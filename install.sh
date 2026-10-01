@@ -253,7 +253,7 @@ Host $tunnel_alias
     Port $server_port
     IdentityFile $device_key
     IdentitiesOnly yes
-    RemoteForward $reverse_port:localhost:$device_port
+    RemoteForward $reverse_port localhost:$device_port
     ExitOnForwardFailure yes
     ServerAliveInterval 60
     ServerAliveCountMax 3

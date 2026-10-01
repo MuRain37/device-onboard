@@ -116,4 +116,23 @@ if grep -q 'device-onboard' "$TMP_HOME/.ssh/config"; then
 fi
 rm -f "$TMP_HOME/.ssh/config"
 
+# --- 回归防护：写进 ssh config 的 RemoteForward 必须能被 ssh 解析 ---
+# ssh_config 里得用两参数写法 `RemoteForward <listen> <target>`；
+# 把命令行那种 `2230:localhost:8022` 的单参数写法抄进来，ssh 会直接拒绝启动。
+fwd_line=$(grep -m1 '^    RemoteForward ' "$ROOT/install.sh")
+if [ -z "$fwd_line" ]; then
+    printf 'install.sh 里找不到 RemoteForward 模板，测试需要更新\n' >&2
+    exit 1
+fi
+fwd_line=$(printf '%s\n' "$fwd_line" | sed 's/\$reverse_port/2230/g; s/\$device_port/8022/g')
+cfg=$(mktemp)
+printf 'Host fwdtest\n%s\n' "$fwd_line" > "$cfg"
+if ! ssh -F "$cfg" -G fwdtest >/dev/null 2>&1; then
+    printf 'RemoteForward 这行 ssh 解析不了：%s\n' "$fwd_line" >&2
+    ssh -F "$cfg" -G fwdtest 2>&1 | head -2 >&2
+    rm -f "$cfg"
+    exit 1
+fi
+rm -f "$cfg"
+
 printf 'smoke tests passed\n'
