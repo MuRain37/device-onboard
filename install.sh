@@ -51,6 +51,14 @@ detect_platform() {
     fi
 }
 
+# Termux 上 sshd 就是一个命令，直接起：已经在跑的话它会报“端口被占用”然后退出，无害。
+# 这里刻意不做端口探测 —— 按设计文档，“验证必须端到端”，端口在听不等于转发能通。
+# macOS 的“远程登录”需要图形界面与管理员权限，脚本无法代劳，只能提示。
+ensure_device_sshd() {
+    sshd >/dev/null 2>&1 || true
+    printf '\n已确保 sshd 在运行（端口 %s）。\n' "$device_port"
+}
+
 detect_platform
 command -v ssh >/dev/null 2>&1 || die "找不到 ssh。"
 command -v ssh-keygen >/dev/null 2>&1 || die "找不到 ssh-keygen。"
@@ -107,7 +115,7 @@ server_key_relative=".ssh/device-onboard/${device_id}-server"
 server_pub_relative="$server_key_relative.pub"
 
 if [ "$PLATFORM" = "termux" ]; then
-    printf '\n请确认 Termux 里已启动 sshd（默认端口 %s），否则服务器无法回连本机。\n' "$device_port"
+    ensure_device_sshd
 else
     printf '\n请确认 macOS 已开启“远程登录”，否则服务器无法回连本机。\n'
 fi

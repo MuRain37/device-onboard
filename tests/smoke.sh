@@ -77,4 +77,20 @@ printf '0\n' | PATH="$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
     sh "$ROOT/install.sh" >/tmp/device-onboard-smoke.out 2>&1
 grep -q '设备接入设置' /tmp/device-onboard-smoke.out
 
+# --- Termux: 自动确保 sshd 在跑 ---
+
+# 用假的 sshd 记录调用，避免测试时真的去起 sshd
+cat > "$FAKE_BIN/sshd" <<'EOF'
+#!/bin/sh
+printf 'sshd called\n' >> "$FAKE_SSHD_LOG"
+exit 0
+EOF
+chmod 755 "$FAKE_BIN/sshd"
+: > "$TMP_HOME/sshd.log"
+printf '1\n\ntest.invalid\nubuntu\n\n' | env FAKE_SSHD_LOG="$TMP_HOME/sshd.log" TERMUX_VERSION=0.118 PATH="$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
+    DEVICE_ONBOARD_CONFIG_DIR="$TMP_HOME/p4" DEVICE_ONBOARD_KEY_DIR="$TMP_HOME/k4" DEVICE_ONBOARD_BIN_DIR="$TMP_HOME/b4" \
+    sh "$ROOT/install.sh" >/tmp/device-onboard-smoke.out 2>&1 || true
+grep -q '已确保 sshd 在运行' /tmp/device-onboard-smoke.out
+grep -q 'sshd called' "$TMP_HOME/sshd.log"
+
 printf 'smoke tests passed\n'
