@@ -32,10 +32,13 @@ grep -q '还没有设备接入配置' /tmp/device-onboard-smoke.out
 cat > "$TMP_HOME/config/config" <<EOF
 SERVER_HOST_ALIAS=onboard-server-test
 TUNNEL_HOST_ALIAS=onboard-tunnel-test
+REVERSE_PORT=2230
+DEVICE_PORT=8022
 EOF
 
 FAKE_SSH_LOG="$TMP_HOME/ssh.log" PATH="$FAKE_BIN:$PATH" HOME="$TMP_HOME" DEVICE_ONBOARD_CONFIG_FILE="$TMP_HOME/config/config" sh "$ROOT/bin/device-tunnel"
-grep -q -- '-N onboard-tunnel-test' "$TMP_HOME/ssh.log"
+grep -q 'onboard-tunnel-test' "$TMP_HOME/ssh.log"
+grep -q '反向隧道已建立' "$TMP_HOME/ssh.log"
 
 FAKE_SSH_LOG="$TMP_HOME/ssh.log" PATH="$FAKE_BIN:$PATH" HOME="$TMP_HOME" DEVICE_ONBOARD_CONFIG_FILE="$TMP_HOME/config/config" sh "$ROOT/bin/server-harness" codex --version
 grep -q -- '-t onboard-server-test codex --version' "$TMP_HOME/ssh.log"
@@ -87,7 +90,9 @@ exit 0
 EOF
 chmod 755 "$FAKE_BIN/sshd"
 : > "$TMP_HOME/sshd.log"
+# 端口区间压成一个，避免这段流程在测试里空转 70 次
 printf '1\n\ntest.invalid\nubuntu\n\n' | env FAKE_SSHD_LOG="$TMP_HOME/sshd.log" TERMUX_VERSION=0.118 PATH="$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
+    DEVICE_ONBOARD_REVERSE_PORT_START=2230 DEVICE_ONBOARD_REVERSE_PORT_END=2230 \
     DEVICE_ONBOARD_CONFIG_DIR="$TMP_HOME/p4" DEVICE_ONBOARD_KEY_DIR="$TMP_HOME/k4" DEVICE_ONBOARD_BIN_DIR="$TMP_HOME/b4" \
     sh "$ROOT/install.sh" >/tmp/device-onboard-smoke.out 2>&1 || true
 grep -q '已确保 sshd 在运行' /tmp/device-onboard-smoke.out

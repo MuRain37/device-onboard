@@ -180,9 +180,6 @@ if [ "$PLATFORM" = "termux" ]; then
 else
     printf '\n请确认 macOS 已开启“远程登录”，否则服务器无法回连本机。\n'
 fi
-printf '继续接入？[Y/n]：'
-read -r confirm
-case "$confirm" in n|N) exit 0;; esac
 
 mkdir -p "$HOME/.ssh" "$KEY_DIR"
 chmod 700 "$HOME/.ssh" "$KEY_DIR"

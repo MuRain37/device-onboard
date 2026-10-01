@@ -14,4 +14,11 @@ if [ -n "${TERMUX_VERSION:-}" ]; then
 fi
 
 printf '正在建立反向 SSH 隧道；保持此窗口，按 Ctrl-C 结束。\n'
-exec ssh -N "$TUNNEL_HOST_ALIAS"
+# 不用 -N：改成让服务器端跑一个「只负责报喜、然后挂住保持连接」的命令。
+# 通道的 Host 块里有 ExitOnForwardFailure yes —— 转发真绑上了才会执行到那几行，
+# 所以这句「已建立」是服务器亲口说的，不是本地瞎报。
+exec ssh "$TUNNEL_HOST_ALIAS" "\
+printf '✅ 反向隧道已建立\n'; \
+printf '   服务器 127.0.0.1:${REVERSE_PORT}  →  本机 localhost:${DEVICE_PORT}\n'; \
+printf '   断开：Ctrl-C\n'; \
+exec sleep 2147483647"
