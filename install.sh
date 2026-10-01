@@ -18,6 +18,8 @@ usage() {
   DEVICE_ONBOARD_CONFIG_DIR         本地配置目录
   DEVICE_ONBOARD_KEY_DIR            本地密钥目录
   DEVICE_ONBOARD_DEVICE_SSH_PORT    本机 sshd 端口（macOS 默认 22，Termux 默认 8022）
+  DEVICE_ONBOARD_REVERSE_PORT_START 反向端口起点（默认 2230，避开手工占用的低位端口）
+  DEVICE_ONBOARD_REVERSE_PORT_END   反向端口终点（默认 2299）
 EOF
 }
 
@@ -149,8 +151,12 @@ if [ "$DEVICE_NEEDS_WAKE_LOCK" = 1 ]; then
     command -v termux-wake-lock >/dev/null 2>&1 && termux-wake-lock >/dev/null 2>&1 || true
 fi
 
-port=2222
-while [ "$port" -le 2299 ]; do
+# 反向端口搜索区间：起点刻意避开手工占用的低位端口（2222/2223）。
+reverse_port_start=${DEVICE_ONBOARD_REVERSE_PORT_START:-2230}
+reverse_port_end=${DEVICE_ONBOARD_REVERSE_PORT_END:-2299}
+
+port=$reverse_port_start
+while [ "$port" -le "$reverse_port_end" ]; do
     ssh -i "$device_key" -o IdentitiesOnly=yes -o ExitOnForwardFailure=yes -o ConnectTimeout=8 -p "$server_port" -R "$port:localhost:$device_port" -N "$server_target" >/tmp/device-onboard-tunnel.$$.log 2>&1 &
     tunnel_pid=$!
     sleep 1
@@ -162,7 +168,7 @@ while [ "$port" -le 2299 ]; do
     tunnel_pid=
     port=$((port + 1))
 done
-[ -n "$reverse_port" ] || die "无法在 2222-2299 中找到可用反向端口。"
+[ -n "$reverse_port" ] || die "无法在 $reverse_port_start-$reverse_port_end 中找到可用反向端口。"
 
 server_alias="onboard-server-$device_id"
 tunnel_alias="onboard-tunnel-$device_id"
