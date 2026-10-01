@@ -135,4 +135,14 @@ if ! ssh -F "$cfg" -G fwdtest >/dev/null 2>&1; then
 fi
 rm -f "$cfg"
 
+# --- 命令要装进本来就处于 PATH 里的目录（Termux 上是 $PREFIX/bin）---
+mkdir -p "$TMP_HOME/prefix/bin"
+printf '0\n' | env TERMUX_VERSION=0.118 PREFIX="$TMP_HOME/prefix" PATH="$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
+    DEVICE_ONBOARD_CONFIG_DIR="$TMP_HOME/p7" DEVICE_ONBOARD_KEY_DIR="$TMP_HOME/k7" \
+    sh "$ROOT/install.sh" >/tmp/device-onboard-smoke.out 2>&1 || true
+if [ ! -x "$TMP_HOME/prefix/bin/device-tunnel" ]; then
+    printf 'device-tunnel 没有装进 $PREFIX/bin（默认 BIN_DIR 选错了）\n' >&2
+    exit 1
+fi
+
 printf 'smoke tests passed\n'

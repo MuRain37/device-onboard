@@ -2,7 +2,7 @@
 set -eu
 
 PROJECT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-BIN_DIR=${DEVICE_ONBOARD_BIN_DIR:-"$HOME/.local/bin"}
+BIN_DIR=${DEVICE_ONBOARD_BIN_DIR:-}
 CONFIG_DIR=${DEVICE_ONBOARD_CONFIG_DIR:-"$HOME/.config/device-onboard"}
 STATE_FILE="$CONFIG_DIR/config"
 KEY_DIR=${DEVICE_ONBOARD_KEY_DIR:-"$HOME/.ssh/device-onboard"}
@@ -14,7 +14,7 @@ usage() {
 首次运行会安装本地命令并进入设备接入设置；再次运行只更新本地命令。
 支持平台：macOS、Termux（Android）。
 环境变量：
-  DEVICE_ONBOARD_BIN_DIR            本地命令安装目录
+  DEVICE_ONBOARD_BIN_DIR            本地命令安装目录（默认 Termux: $PREFIX/bin；macOS: /usr/local/bin）
   DEVICE_ONBOARD_CONFIG_DIR         本地配置目录
   DEVICE_ONBOARD_KEY_DIR            本地密钥目录
   DEVICE_ONBOARD_DEVICE_SSH_PORT    本机 sshd 端口（macOS 默认 22，Termux 默认 8022）
@@ -77,7 +77,21 @@ strip_device_onboard_blocks() {
     printf '已清理 ~/.ssh/config 里旧的 device-onboard 区块（备份在 config.device-onboard.bak）。\n'
 }
 
+# 命令装在本来就处于 PATH 里的目录，否则装完敲不出来：
+#   Termux → $PREFIX/bin（Termux 的标准位置，必在 PATH 里）
+#   macOS  → /usr/local/bin（系统标准位置）；不可写再退回 ~/.local/bin
+default_bin_dir() {
+    if [ "$PLATFORM" = "termux" ] && [ -n "${PREFIX:-}" ] && [ -w "${PREFIX}/bin" ]; then
+        printf '%s' "${PREFIX}/bin"
+    elif [ -d /usr/local/bin ] && [ -w /usr/local/bin ]; then
+        printf '%s' /usr/local/bin
+    else
+        printf '%s' "$HOME/.local/bin"
+    fi
+}
+
 detect_platform
+[ -n "$BIN_DIR" ] || BIN_DIR=$(default_bin_dir)
 command -v ssh >/dev/null 2>&1 || die "找不到 ssh。"
 command -v ssh-keygen >/dev/null 2>&1 || die "找不到 ssh-keygen。"
 [ -n "$DEVICE_SSH_PORT" ] || die "无法确定设备 SSH 端口。"
@@ -101,6 +115,15 @@ copy_command() {
 }
 copy_command "$PROJECT_DIR/bin/device-tunnel" "$BIN_DIR/device-tunnel"
 copy_command "$PROJECT_DIR/bin/server-harness" "$BIN_DIR/server-harness"
+
+# 装的目录若不在 PATH 里，明说怎么加 —— 别让人对着 command not found 发懵。
+case ":$PATH:" in
+    *":$BIN_DIR:"*) : ;;
+    *)
+        printf '提示：%s 不在 PATH 里，新开的终端可能敲不到 device-tunnel。\n' "$BIN_DIR"
+        printf '      在 shell 配置里加一行：export PATH="%s:$PATH"\n' "$BIN_DIR"
+        ;;
+esac
 
 if [ -f "$STATE_FILE" ]; then
     printf '本地命令已更新。已有设备配置，跳过首次接入。\n'
