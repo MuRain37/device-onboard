@@ -1,0 +1,227 @@
+#!/bin/sh
+set -eu
+
+PROJECT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+BIN_DIR=${DEVICE_ONBOARD_BIN_DIR:-"$HOME/.local/bin"}
+CONFIG_DIR=${DEVICE_ONBOARD_CONFIG_DIR:-"$HOME/.config/device-onboard"}
+STATE_FILE="$CONFIG_DIR/config"
+KEY_DIR=${DEVICE_ONBOARD_KEY_DIR:-"$HOME/.ssh/device-onboard"}
+
+usage() {
+    cat <<'EOF'
+用法：sh install.sh
+
+首次运行会安装本地命令并进入设备接入设置；再次运行只更新本地命令。
+环境变量：
+  DEVICE_ONBOARD_BIN_DIR     本地命令安装目录
+  DEVICE_ONBOARD_CONFIG_DIR  本地配置目录
+  DEVICE_ONBOARD_KEY_DIR     本地密钥目录
+EOF
+}
+
+die() { printf '错误：%s\n' "$*" >&2; exit 1; }
+
+[ "${1:-}" = "--help" ] && { usage; exit 0; }
+[ "${1:-}" = "-h" ] && { usage; exit 0; }
+[ "$(uname -s)" = "Darwin" ] || die "首版只支持 macOS。"
+command -v ssh >/dev/null 2>&1 || die "找不到 ssh。"
+command -v ssh-keygen >/dev/null 2>&1 || die "找不到 ssh-keygen。"
+
+mkdir -p "$BIN_DIR" "$CONFIG_DIR" "$KEY_DIR"
+chmod 700 "$CONFIG_DIR" "$KEY_DIR"
+install -m 755 "$PROJECT_DIR/bin/device-tunnel" "$BIN_DIR/device-tunnel"
+install -m 755 "$PROJECT_DIR/bin/server-harness" "$BIN_DIR/server-harness"
+
+if [ -f "$STATE_FILE" ]; then
+    printf '本地命令已更新。已有设备配置，跳过首次接入。\n'
+    printf '日常命令：device-tunnel、server-harness <命令>\n'
+    exit 0
+fi
+
+printf '\n设备接入设置\n\n'
+printf '1) 配置设备与服务器的 SSH 连接\n'
+printf '0) 退出\n\n'
+printf '请选择：'
+read -r choice
+[ "$choice" = "1" ] || exit 0
+
+default_name=$(scutil --get ComputerName 2>/dev/null || hostname -s)
+printf '设备名称 [%s]：' "$default_name"
+read -r device_name
+device_name=${device_name:-$default_name}
+[ -n "$device_name" ] || die "设备名称不能为空。"
+
+printf '服务器地址（IP 或域名）：'
+read -r server_host
+[ -n "$server_host" ] || die "服务器地址不能为空。"
+printf '服务器 SSH 用户名：'
+read -r server_user
+[ -n "$server_user" ] || die "服务器用户名不能为空。"
+printf '服务器 SSH 端口 [22]：'
+read -r server_port
+server_port=${server_port:-22}
+case "$server_port" in *[!0-9]*|'') die "服务器端口必须是数字。";; esac
+
+device_user=$(id -un)
+device_port=22
+device_id=$(printf '%s' "$device_name" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9._-' '-')
+device_id=${device_id#-}; device_id=${device_id%-}
+[ -n "$device_id" ] || die "设备名称无法生成有效 ID。"
+server_target="$server_user@$server_host"
+device_key="$KEY_DIR/${device_id}-device"
+server_key_relative=".ssh/device-onboard/${device_id}-server"
+server_pub_relative="$server_key_relative.pub"
+
+printf '\n请确认 macOS 已开启“远程登录”，否则服务器无法回连本机。\n'
+printf '继续接入？[Y/n]：'
+read -r confirm
+case "$confirm" in n|N) exit 0;; esac
+
+mkdir -p "$HOME/.ssh" "$KEY_DIR"
+chmod 700 "$HOME/.ssh" "$KEY_DIR"
+if [ ! -f "$device_key" ]; then
+    ssh-keygen -q -t ed25519 -N '' -f "$device_key" -C "device-onboard:$device_id"
+fi
+chmod 600 "$device_key"
+
+device_pub=$(cat "$device_key.pub")
+printf '\n首次 SSH 连接将由系统提示确认主机指纹或输入密码。\n'
+printf '%s\n' "$device_pub" | ssh -p "$server_port" "$server_target" 'set -eu; umask 077; mkdir -p "$HOME/.ssh"; touch "$HOME/.ssh/authorized_keys"; key=$(cat); grep -qxF "$key" "$HOME/.ssh/authorized_keys" 2>/dev/null || printf "%s\n" "$key" >> "$HOME/.ssh/authorized_keys"; chmod 600 "$HOME/.ssh/authorized_keys"'
+
+server_ssh() {
+    ssh -i "$device_key" -o IdentitiesOnly=yes -p "$server_port" "$server_target" "$@"
+}
+
+server_ssh "umask 077; mkdir -p \"\$HOME/.ssh/device-onboard\"; key=\"\$HOME/$server_key_relative\"; if [ ! -f \"\$key\" ]; then ssh-keygen -q -t ed25519 -N '' -f \"\$key\" -C 'device-onboard:$device_id'; fi; cat \"\$key.pub\"" > "$CONFIG_DIR/server-key.pub"
+chmod 600 "$CONFIG_DIR/server-key.pub"
+server_pub=$(cat "$CONFIG_DIR/server-key.pub")
+grep -qxF "$server_pub" "$HOME/.ssh/authorized_keys" 2>/dev/null || printf '%s\n' "$server_pub" >> "$HOME/.ssh/authorized_keys"
+chmod 600 "$HOME/.ssh/authorized_keys"
+
+reverse_port=
+tunnel_pid=
+cleanup_tunnel() {
+    if [ -n "${tunnel_pid:-}" ]; then
+        kill "$tunnel_pid" 2>/dev/null || true
+        wait "$tunnel_pid" 2>/dev/null || true
+    fi
+}
+trap cleanup_tunnel EXIT INT TERM
+
+port=2222
+while [ "$port" -le 2299 ]; do
+    ssh -i "$device_key" -o IdentitiesOnly=yes -o ExitOnForwardFailure=yes -o ConnectTimeout=8 -p "$server_port" -R "$port:localhost:$device_port" -N "$server_target" >/tmp/device-onboard-tunnel.$$.log 2>&1 &
+    tunnel_pid=$!
+    sleep 1
+    if kill -0 "$tunnel_pid" 2>/dev/null; then
+        reverse_port=$port
+        break
+    fi
+    wait "$tunnel_pid" 2>/dev/null || true
+    tunnel_pid=
+    port=$((port + 1))
+done
+[ -n "$reverse_port" ] || die "无法在 2222-2299 中找到可用反向端口。"
+
+server_alias="onboard-server-$device_id"
+tunnel_alias="onboard-tunnel-$device_id"
+device_alias="onboard-device-$device_id"
+server_key_local="~/.ssh/device-onboard/${device_id}-server"
+local_begin="# >>> device-onboard:$device_id BEGIN"
+local_end="# <<< device-onboard:$device_id END"
+
+local_block=$(cat <<EOF
+$local_begin
+Host $server_alias
+    HostName $server_host
+    User $server_user
+    Port $server_port
+    IdentityFile $device_key
+    IdentitiesOnly yes
+    ServerAliveInterval 60
+    ServerAliveCountMax 3
+
+Host $tunnel_alias
+    HostName $server_host
+    User $server_user
+    Port $server_port
+    IdentityFile $device_key
+    IdentitiesOnly yes
+    RemoteForward $reverse_port:localhost:$device_port
+    ExitOnForwardFailure yes
+    ServerAliveInterval 60
+    ServerAliveCountMax 3
+$local_end
+EOF
+)
+
+update_local_config() {
+    config="$HOME/.ssh/config"
+    tmp=$(mktemp)
+    if [ -f "$config" ]; then
+        awk -v begin="$local_begin" -v end="$local_end" '$0 == begin {skip=1; next} $0 == end {skip=0; next} !skip {print}' "$config" > "$tmp"
+        cp "$config" "$config.device-onboard.bak"
+    fi
+    printf '%s\n' "$local_block" >> "$tmp"
+    mv "$tmp" "$config"
+    chmod 600 "$config"
+}
+update_local_config
+
+remote_begin="# >>> device-onboard:$device_id BEGIN"
+remote_end="# <<< device-onboard:$device_id END"
+remote_block=$(cat <<EOF
+$remote_begin
+Host $device_alias
+    HostName 127.0.0.1
+    User $device_user
+    Port $reverse_port
+    IdentityFile $server_key_local
+    IdentitiesOnly yes
+    ServerAliveInterval 60
+    ServerAliveCountMax 3
+$remote_end
+EOF
+)
+
+printf '%s\n' "$remote_block" | server_ssh "set -eu; file=\"\$HOME/.ssh/config\"; tmp=\"\$(mktemp)\"; mkdir -p \"\$HOME/.ssh\"; if [ -f \"\$file\" ]; then awk -v begin='$remote_begin' -v end='$remote_end' '\$0 == begin {skip=1; next} \$0 == end {skip=0; next} !skip {print}' \"\$file\" > \"\$tmp\"; cp \"\$file\" \"\$file.device-onboard.bak\"; else : > \"\$tmp\"; fi; cat >> \"\$tmp\"; mv \"\$tmp\" \"\$file\"; chmod 600 \"\$file\""
+
+skill_begin="<!-- DEVICE-ONBOARD:$device_id BEGIN -->"
+skill_end="<!-- DEVICE-ONBOARD:$device_id END -->"
+skill_block=$(cat <<EOF
+$skill_begin
+device_name: $device_name
+server_host: $server_host
+server_user: $server_user
+server_ssh_port: $server_port
+device_ssh_port: $device_port
+reverse_port: $reverse_port
+device_key_name: $device_id-device
+server_key_name: $device_id-server
+$skill_end
+EOF
+)
+printf '%s\n' "$skill_block" | server_ssh "set -eu; dir=\"\$HOME/.agents/skills/device-onboard\"; file=\"\$dir/SKILL.md\"; tmp=\"\$(mktemp)\"; mkdir -p \"\$dir\"; if [ -f \"\$file\" ]; then awk -v begin='$skill_begin' -v end='$skill_end' '\$0 == begin {skip=1; next} \$0 == end {skip=0; next} !skip {print}' \"\$file\" > \"\$tmp\"; cp \"\$file\" \"\$file.device-onboard.bak\"; else printf '# Device Onboard\\n\\n' > \"\$tmp\"; fi; cat >> \"\$tmp\"; mv \"\$tmp\" \"\$file\""
+
+cat > "$STATE_FILE" <<EOF
+DEVICE_ID=$device_id
+DEVICE_NAME=$device_name
+DEVICE_USER=$device_user
+SERVER_HOST=$server_host
+SERVER_USER=$server_user
+SERVER_PORT=$server_port
+DEVICE_PORT=$device_port
+REVERSE_PORT=$reverse_port
+SERVER_HOST_ALIAS=$server_alias
+TUNNEL_HOST_ALIAS=$tunnel_alias
+DEVICE_HOST_ALIAS=$device_alias
+DEVICE_KEY=$device_key
+EOF
+chmod 600 "$STATE_FILE"
+cleanup_tunnel
+trap - EXIT INT TERM
+
+printf '\n✅ 设备接入完成。\n'
+printf '普通服务器：ssh %s\n' "$server_alias"
+printf '反向隧道：device-tunnel\n'
+printf '远程 Harness：server-harness codex\n'
