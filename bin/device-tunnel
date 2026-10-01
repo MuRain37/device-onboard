@@ -7,5 +7,11 @@ if [ ! -f "$CONFIG_FILE" ]; then
 fi
 . "$CONFIG_FILE"
 : "${TUNNEL_HOST_ALIAS:?配置缺少 TUNNEL_HOST_ALIAS}"
+
+# Termux（Android）会在后台回收进程；隧道必须持有唤醒锁，否则会被系统掐断。
+if [ -n "${TERMUX_VERSION:-}" ]; then
+    command -v termux-wake-lock >/dev/null 2>&1 && termux-wake-lock >/dev/null 2>&1 || true
+fi
+
 printf '正在建立反向 SSH 隧道；保持此窗口，按 Ctrl-C 结束。\n'
 exec ssh -N "$TUNNEL_HOST_ALIAS"

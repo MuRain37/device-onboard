@@ -12,10 +12,12 @@ usage() {
 用法：sh install.sh
 
 首次运行会安装本地命令并进入设备接入设置；再次运行只更新本地命令。
+支持平台：macOS、Termux（Android）。
 环境变量：
-  DEVICE_ONBOARD_BIN_DIR     本地命令安装目录
-  DEVICE_ONBOARD_CONFIG_DIR  本地配置目录
-  DEVICE_ONBOARD_KEY_DIR     本地密钥目录
+  DEVICE_ONBOARD_BIN_DIR            本地命令安装目录
+  DEVICE_ONBOARD_CONFIG_DIR         本地配置目录
+  DEVICE_ONBOARD_KEY_DIR            本地密钥目录
+  DEVICE_ONBOARD_DEVICE_SSH_PORT    本机 sshd 端口（macOS 默认 22，Termux 默认 8022）
 EOF
 }
 
@@ -23,14 +25,44 @@ die() { printf '错误：%s\n' "$*" >&2; exit 1; }
 
 [ "${1:-}" = "--help" ] && { usage; exit 0; }
 [ "${1:-}" = "-h" ] && { usage; exit 0; }
-[ "$(uname -s)" = "Darwin" ] || die "首版只支持 macOS。"
+# 平台差异全部收在 detect_platform 里，主流程不区分平台。
+PLATFORM=
+DEVICE_SSH_PORT=
+DEVICE_DEFAULT_NAME=
+DEVICE_NEEDS_WAKE_LOCK=0
+
+detect_platform() {
+    if [ -n "${TERMUX_VERSION:-}" ] || [ -d /data/data/com.termux ]; then
+        PLATFORM=termux
+        # Termux 无法绑定特权端口，sshd 默认在 8022。
+        DEVICE_SSH_PORT=${DEVICE_ONBOARD_DEVICE_SSH_PORT:-8022}
+        DEVICE_DEFAULT_NAME=$(getprop ro.product.model 2>/dev/null || true)
+        [ -n "$DEVICE_DEFAULT_NAME" ] || DEVICE_DEFAULT_NAME=termux
+        DEVICE_NEEDS_WAKE_LOCK=1
+    elif [ "$(uname -s)" = "Darwin" ]; then
+        PLATFORM=macos
+        DEVICE_SSH_PORT=${DEVICE_ONBOARD_DEVICE_SSH_PORT:-22}
+        DEVICE_DEFAULT_NAME=$(scutil --get ComputerName 2>/dev/null || hostname -s 2>/dev/null || true)
+        [ -n "$DEVICE_DEFAULT_NAME" ] || DEVICE_DEFAULT_NAME=device
+    else
+        die "不支持的平台：首版只支持 macOS 和 Termux。"
+    fi
+}
+
+detect_platform
 command -v ssh >/dev/null 2>&1 || die "找不到 ssh。"
 command -v ssh-keygen >/dev/null 2>&1 || die "找不到 ssh-keygen。"
+[ -n "$DEVICE_SSH_PORT" ] || die "无法确定设备 SSH 端口。"
 
 mkdir -p "$BIN_DIR" "$CONFIG_DIR" "$KEY_DIR"
 chmod 700 "$CONFIG_DIR" "$KEY_DIR"
-install -m 755 "$PROJECT_DIR/bin/device-tunnel" "$BIN_DIR/device-tunnel"
-install -m 755 "$PROJECT_DIR/bin/server-harness" "$BIN_DIR/server-harness"
+copy_command() {
+    # 不用 install(1)：Termux 基础环境不保证有这个命令。
+    cp -f "$1" "$2"
+    chmod 755 "$2"
+}
+copy_command "$PROJECT_DIR/bin/device-tunnel" "$BIN_DIR/device-tunnel"
+copy_command "$PROJECT_DIR/bin/server-harness" "$BIN_DIR/server-harness"
 
 if [ -f "$STATE_FILE" ]; then
     printf '本地命令已更新。已有设备配置，跳过首次接入。\n'
@@ -45,7 +77,7 @@ printf '请选择：'
 read -r choice
 [ "$choice" = "1" ] || exit 0
 
-default_name=$(scutil --get ComputerName 2>/dev/null || hostname -s)
+default_name=$DEVICE_DEFAULT_NAME
 printf '设备名称 [%s]：' "$default_name"
 read -r device_name
 device_name=${device_name:-$default_name}
@@ -63,7 +95,7 @@ server_port=${server_port:-22}
 case "$server_port" in *[!0-9]*|'') die "服务器端口必须是数字。";; esac
 
 device_user=$(id -un)
-device_port=22
+device_port=$DEVICE_SSH_PORT
 device_id=$(printf '%s' "$device_name" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9._-' '-')
 device_id=${device_id#-}; device_id=${device_id%-}
 [ -n "$device_id" ] || die "设备名称无法生成有效 ID。"
@@ -72,7 +104,11 @@ device_key="$KEY_DIR/${device_id}-device"
 server_key_relative=".ssh/device-onboard/${device_id}-server"
 server_pub_relative="$server_key_relative.pub"
 
-printf '\n请确认 macOS 已开启“远程登录”，否则服务器无法回连本机。\n'
+if [ "$PLATFORM" = "termux" ]; then
+    printf '\n请确认 Termux 里已启动 sshd（默认端口 %s），否则服务器无法回连本机。\n' "$device_port"
+else
+    printf '\n请确认 macOS 已开启“远程登录”，否则服务器无法回连本机。\n'
+fi
 printf '继续接入？[Y/n]：'
 read -r confirm
 case "$confirm" in n|N) exit 0;; esac
@@ -107,6 +143,11 @@ cleanup_tunnel() {
     fi
 }
 trap cleanup_tunnel EXIT INT TERM
+
+# Termux（Android）会在后台回收进程，建立隧道前先申请唤醒锁。
+if [ "$DEVICE_NEEDS_WAKE_LOCK" = 1 ]; then
+    command -v termux-wake-lock >/dev/null 2>&1 && termux-wake-lock >/dev/null 2>&1 || true
+fi
 
 port=2222
 while [ "$port" -le 2299 ]; do
