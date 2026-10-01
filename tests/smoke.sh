@@ -145,4 +145,44 @@ if [ ! -x "$TMP_HOME/prefix/bin/device-tunnel" ]; then
     exit 1
 fi
 
+# --- 「已有配置」这条路径绝不能动 ~/.ssh/config ---
+
+mkdir -p "$TMP_HOME/p8" "$TMP_HOME/.ssh"
+cat > "$TMP_HOME/p8/config" <<'EOF'
+DEVICE_ID=xiaomi
+DEVICE_KEY=/nonexistent
+EOF
+cat > "$TMP_HOME/.ssh/config" <<'EOF'
+Host server
+    HostName example.com
+
+# >>> device-onboard:xiaomi BEGIN
+Host onboard-tunnel-xiaomi
+    RemoteForward 2230 localhost:8022
+# <<< device-onboard:xiaomi END
+EOF
+cp "$TMP_HOME/.ssh/config" "$TMP_HOME/.ssh/config.before"
+printf '0\n' | TERMUX_VERSION=0.118 PATH="$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
+    DEVICE_ONBOARD_CONFIG_DIR="$TMP_HOME/p8" DEVICE_ONBOARD_KEY_DIR="$TMP_HOME/k8" DEVICE_ONBOARD_BIN_DIR="$TMP_HOME/b8" \
+    sh "$ROOT/install.sh" >/tmp/device-onboard-smoke.out 2>&1 || true
+if ! diff -q "$TMP_HOME/.ssh/config.before" "$TMP_HOME/.ssh/config" >/dev/null; then
+    printf '「已有配置」这条路径不该改动 ~/.ssh/config\n' >&2
+    exit 1
+fi
+if grep -q '已清理' /tmp/device-onboard-smoke.out; then
+    printf '「已有配置」这条路径不该执行清理\n' >&2
+    exit 1
+fi
+
+# 配置块真的丢了，要明确提示而不是装没看见
+cat > "$TMP_HOME/.ssh/config" <<'EOF'
+Host server
+    HostName example.com
+EOF
+printf '0\n' | TERMUX_VERSION=0.118 PATH="$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
+    DEVICE_ONBOARD_CONFIG_DIR="$TMP_HOME/p8" DEVICE_ONBOARD_KEY_DIR="$TMP_HOME/k8" DEVICE_ONBOARD_BIN_DIR="$TMP_HOME/b8" \
+    sh "$ROOT/install.sh" >/tmp/device-onboard-smoke.out 2>&1 || true
+grep -q '找不到本设备' /tmp/device-onboard-smoke.out
+rm -f "$TMP_HOME/.ssh/config" "$TMP_HOME/.ssh/config.before"
+
 printf 'smoke tests passed\n'

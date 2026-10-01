@@ -96,16 +96,6 @@ command -v ssh >/dev/null 2>&1 || die "找不到 ssh。"
 command -v ssh-keygen >/dev/null 2>&1 || die "找不到 ssh-keygen。"
 [ -n "$DEVICE_SSH_PORT" ] || die "无法确定设备 SSH 端口。"
 
-# 先清掉自己以前留下的块（可能带着坏值），再做体检 —— 顺序不能反。
-strip_device_onboard_blocks
-
-# 早发现早报错：~/.ssh/config 里若有坏行，之后每一次 ssh 都会失败，
-# 而报错指向的是那一行 —— 很容易让人误以为是本次操作搞坏的。
-if [ -f "$HOME/.ssh/config" ] && ! ssh -G -o BatchMode=yes localhost >/dev/null 2>&1; then
-    printf '警告：当前的 ~/.ssh/config 无法正常解析，请先修好它，否则后面所有 ssh 都会失败。\n' >&2
-    printf '      查看具体报错：ssh -G localhost\n' >&2
-fi
-
 mkdir -p "$BIN_DIR" "$CONFIG_DIR" "$KEY_DIR"
 chmod 700 "$CONFIG_DIR" "$KEY_DIR"
 copy_command() {
@@ -127,8 +117,28 @@ esac
 
 if [ -f "$STATE_FILE" ]; then
     printf '本地命令已更新。已有设备配置，跳过首次接入。\n'
+    # 这条路径绝不能碰 ~/.ssh/config：配置块是「产物」，状态文件才是「源」。
+    # 清掉却重建不出来，就把已经接好的设备弄瘸了。
+    # shellcheck source=/dev/null
+    . "$STATE_FILE"
+    if ! grep -qF "# >>> device-onboard:$DEVICE_ID BEGIN" "$HOME/.ssh/config" 2>/dev/null; then
+        printf '\n⚠️ %s 里找不到本设备（%s）的配置块，device-tunnel 会解析不到主机。\n' "$HOME/.ssh/config" "$DEVICE_ID"
+        printf '   修复：删掉状态文件后重跑，脚本会照常重新生成 ——\n'
+        printf '     rm -rf %s && sh install.sh\n' "$CONFIG_DIR"
+    fi
     printf '日常命令：device-tunnel、server-harness <命令>\n'
     exit 0
+fi
+
+# 只有真要重新接入时才动配置：先清掉自己以前留下的块（可能带着坏值），再做体检。
+# 顺序不能反 —— 坏块会让体检直接报错。
+strip_device_onboard_blocks
+
+# 早发现早报错：~/.ssh/config 里若有坏行，之后每一次 ssh 都会失败，
+# 而报错指向的是那一行 —— 很容易让人误以为是本次操作搞坏的。
+if [ -f "$HOME/.ssh/config" ] && ! ssh -G -o BatchMode=yes localhost >/dev/null 2>&1; then
+    printf '警告：当前的 ~/.ssh/config 无法正常解析，请先修好它，否则后面所有 ssh 都会失败。\n' >&2
+    printf '      查看具体报错：ssh -G localhost\n' >&2
 fi
 
 printf '\n设备接入设置\n\n'
