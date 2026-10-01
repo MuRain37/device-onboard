@@ -59,10 +59,31 @@ ensure_device_sshd() {
     printf '\n已确保 sshd 在运行（端口 %s）。\n' "$device_port"
 }
 
+# 清掉 ~/.ssh/config 里所有 device-onboard 标记块（包括以前跑坏留下的）。
+# 必须在发起任何 ssh 之前执行：一个坏块会让之后每一次 ssh 都拒绝启动。
+strip_device_onboard_blocks() {
+    config="$HOME/.ssh/config"
+    [ -f "$config" ] || return 0
+    grep -q '^# >>> device-onboard:.* BEGIN$' "$config" 2>/dev/null || return 0
+    tmp=$(mktemp)
+    awk '
+        /^# >>> device-onboard:.* BEGIN$/ { skip = 1; next }
+        /^# <<< device-onboard:.* END$/   { skip = 0; next }
+        !skip { print }
+    ' "$config" > "$tmp"
+    cp -p "$config" "$config.device-onboard.bak"
+    mv "$tmp" "$config"
+    chmod 600 "$config"
+    printf '已清理 ~/.ssh/config 里旧的 device-onboard 区块（备份在 config.device-onboard.bak）。\n'
+}
+
 detect_platform
 command -v ssh >/dev/null 2>&1 || die "找不到 ssh。"
 command -v ssh-keygen >/dev/null 2>&1 || die "找不到 ssh-keygen。"
 [ -n "$DEVICE_SSH_PORT" ] || die "无法确定设备 SSH 端口。"
+
+# 先清掉自己以前留下的块（可能带着坏值），再做体检 —— 顺序不能反。
+strip_device_onboard_blocks
 
 # 早发现早报错：~/.ssh/config 里若有坏行，之后每一次 ssh 都会失败，
 # 而报错指向的是那一行 —— 很容易让人误以为是本次操作搞坏的。

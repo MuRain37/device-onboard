@@ -93,4 +93,27 @@ printf '1\n\ntest.invalid\nubuntu\n\n' | env FAKE_SSHD_LOG="$TMP_HOME/sshd.log" 
 grep -q '已确保 sshd 在运行' /tmp/device-onboard-smoke.out
 grep -q 'sshd called' "$TMP_HOME/sshd.log"
 
+# --- 旧的坏块必须被清掉（否则之后每次 ssh 都会失败）---
+
+mkdir -p "$TMP_HOME/.ssh"
+cat > "$TMP_HOME/.ssh/config" <<'EOF'
+Host keepme
+    HostName example.com
+
+# >>> device-onboard:oldrun BEGIN
+Host onboard-tunnel-oldrun
+    RemoteForward :localhost:
+# <<< device-onboard:oldrun END
+EOF
+printf '0\n' | TERMUX_VERSION=0.118 PATH="$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
+    DEVICE_ONBOARD_CONFIG_DIR="$TMP_HOME/p6" DEVICE_ONBOARD_KEY_DIR="$TMP_HOME/k6" DEVICE_ONBOARD_BIN_DIR="$TMP_HOME/b6" \
+    sh "$ROOT/install.sh" >/tmp/device-onboard-smoke.out 2>&1 || true
+grep -q '已清理' /tmp/device-onboard-smoke.out
+grep -q 'Host keepme' "$TMP_HOME/.ssh/config"
+if grep -q 'device-onboard' "$TMP_HOME/.ssh/config"; then
+    printf 'stale device-onboard block was not stripped\n' >&2
+    exit 1
+fi
+rm -f "$TMP_HOME/.ssh/config"
+
 printf 'smoke tests passed\n'
