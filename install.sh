@@ -64,6 +64,13 @@ command -v ssh >/dev/null 2>&1 || die "找不到 ssh。"
 command -v ssh-keygen >/dev/null 2>&1 || die "找不到 ssh-keygen。"
 [ -n "$DEVICE_SSH_PORT" ] || die "无法确定设备 SSH 端口。"
 
+# 早发现早报错：~/.ssh/config 里若有坏行，之后每一次 ssh 都会失败，
+# 而报错指向的是那一行 —— 很容易让人误以为是本次操作搞坏的。
+if [ -f "$HOME/.ssh/config" ] && ! ssh -G -o BatchMode=yes localhost >/dev/null 2>&1; then
+    printf '警告：当前的 ~/.ssh/config 无法正常解析，请先修好它，否则后面所有 ssh 都会失败。\n' >&2
+    printf '      查看具体报错：ssh -G localhost\n' >&2
+fi
+
 mkdir -p "$BIN_DIR" "$CONFIG_DIR" "$KEY_DIR"
 chmod 700 "$CONFIG_DIR" "$KEY_DIR"
 copy_command() {
@@ -191,6 +198,15 @@ if [ -z "$reverse_port" ]; then
     tail -3 "${probe_log:-/dev/null}" 2>/dev/null >&2 || true
     die "无法在 $reverse_port_start-$reverse_port_end 中找到可用反向端口。"
 fi
+
+# 写进 ssh config 的端口必须是纯数字：写成空值或带杂字符，ssh 会直接罢工
+# （Bad forwarding specification），而且会让之后所有 ssh 全部失败。
+case "$reverse_port" in
+    ''|*[!0-9]*) die "反向端口不是有效数字：'$reverse_port'；为避免写坏 ~/.ssh/config，已中止。" ;;
+esac
+case "$device_port" in
+    ''|*[!0-9]*) die "本机 sshd 端口不是有效数字：'$device_port'；为避免写坏 ~/.ssh/config，已中止。" ;;
+esac
 
 server_alias="onboard-server-$device_id"
 tunnel_alias="onboard-tunnel-$device_id"
