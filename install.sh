@@ -244,6 +244,7 @@ Host $server_alias
     Port $server_port
     IdentityFile $device_key
     IdentitiesOnly yes
+    StrictHostKeyChecking accept-new
     ServerAliveInterval 60
     ServerAliveCountMax 3
 
@@ -253,6 +254,7 @@ Host $tunnel_alias
     Port $server_port
     IdentityFile $device_key
     IdentitiesOnly yes
+    StrictHostKeyChecking accept-new
     RemoteForward $reverse_port localhost:$device_port
     ExitOnForwardFailure yes
     ServerAliveInterval 60
@@ -284,6 +286,7 @@ Host $device_alias
     Port $reverse_port
     IdentityFile $server_key_local
     IdentitiesOnly yes
+    StrictHostKeyChecking accept-new
     ServerAliveInterval 60
     ServerAliveCountMax 3
 $remote_end
