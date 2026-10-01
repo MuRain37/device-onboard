@@ -151,6 +151,9 @@ cleanup_tunnel() {
         kill "$tunnel_pid" 2>/dev/null || true
         wait "$tunnel_pid" 2>/dev/null || true
     fi
+    if [ -n "${probe_log:-}" ]; then
+        rm -f "$probe_log" 2>/dev/null || true
+    fi
 }
 trap cleanup_tunnel EXIT INT TERM
 
@@ -163,9 +166,16 @@ fi
 reverse_port_start=${DEVICE_ONBOARD_REVERSE_PORT_START:-2230}
 reverse_port_end=${DEVICE_ONBOARD_REVERSE_PORT_END:-2299}
 
+# Termux 上 /tmp 不可写（Android 限制），必须用 $TMPDIR；再不行退回配置目录。
+probe_log_dir=${TMPDIR:-/tmp}
+if [ ! -d "$probe_log_dir" ] || [ ! -w "$probe_log_dir" ]; then
+    probe_log_dir=$CONFIG_DIR
+fi
+probe_log="$probe_log_dir/device-onboard-tunnel.$$.log"
+
 port=$reverse_port_start
 while [ "$port" -le "$reverse_port_end" ]; do
-    ssh -i "$device_key" -o IdentitiesOnly=yes -o ExitOnForwardFailure=yes -o ConnectTimeout=8 -p "$server_port" -R "$port:localhost:$device_port" -N "$server_target" >/tmp/device-onboard-tunnel.$$.log 2>&1 &
+    ssh -i "$device_key" -o IdentitiesOnly=yes -o ExitOnForwardFailure=yes -o ConnectTimeout=8 -p "$server_port" -R "$port:localhost:$device_port" -N "$server_target" >"$probe_log" 2>&1 &
     tunnel_pid=$!
     sleep 1
     if kill -0 "$tunnel_pid" 2>/dev/null; then
@@ -176,7 +186,11 @@ while [ "$port" -le "$reverse_port_end" ]; do
     tunnel_pid=
     port=$((port + 1))
 done
-[ -n "$reverse_port" ] || die "无法在 $reverse_port_start-$reverse_port_end 中找到可用反向端口。"
+if [ -z "$reverse_port" ]; then
+    printf '探测隧道时的最后几行报错：\n' >&2
+    tail -3 "${probe_log:-/dev/null}" 2>/dev/null >&2 || true
+    die "无法在 $reverse_port_start-$reverse_port_end 中找到可用反向端口。"
+fi
 
 server_alias="onboard-server-$device_id"
 tunnel_alias="onboard-tunnel-$device_id"
