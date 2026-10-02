@@ -22,17 +22,11 @@ if [ "$#" -gt 0 ]; then
     shift
 fi
 
-# 正常两个命令都装在同一个目录、都在 PATH 里；找不到就退回脚本自己所在的目录。
+# device-tunnel 正常装在 PATH 里；找不到就退回脚本自己所在的目录。
 TUNNEL_BIN=$(command -v device-tunnel 2>/dev/null || true)
-HARNESS_BIN=$(command -v server-harness 2>/dev/null || true)
 [ -n "$TUNNEL_BIN" ] || TUNNEL_BIN=$(dirname "$0")/device-tunnel
-[ -n "$HARNESS_BIN" ] || HARNESS_BIN=$(dirname "$0")/server-harness
 if [ ! -x "$TUNNEL_BIN" ]; then
     printf '错误：找不到 device-tunnel，请先跑 install.sh 装好本地命令。\n' >&2
-    exit 1
-fi
-if [ ! -x "$HARNESS_BIN" ]; then
-    printf '错误：找不到 server-harness，请先跑 install.sh 装好本地命令。\n' >&2
     exit 1
 fi
 
@@ -81,4 +75,4 @@ if ! grep -q '反向隧道已建立' "$READY_FILE" 2>/dev/null; then
 fi
 
 printf '隧道就绪。在服务器上启动 %s（退出后隧道自动收起）…\n\n' "$HARNESS_CMD"
-"$HARNESS_BIN" "$HARNESS_CMD" "$@"
+ssh -t "$SERVER_HOST_ALIAS" "$HARNESS_CMD" "$@"

@@ -23,8 +23,8 @@ if HOME="$TMP_HOME" DEVICE_ONBOARD_CONFIG_FILE="$TMP_HOME/missing/config" sh "$R
 fi
 grep -q '还没有设备接入配置' /tmp/device-onboard-smoke.out
 
-if HOME="$TMP_HOME" DEVICE_ONBOARD_CONFIG_FILE="$TMP_HOME/missing/config" sh "$ROOT/bin/server-harness" >/tmp/device-onboard-smoke.out 2>&1; then
-    printf 'server-harness should fail without configuration\n' >&2
+if HOME="$TMP_HOME" DEVICE_ONBOARD_CONFIG_FILE="$TMP_HOME/missing/config" sh "$ROOT/bin/device-harness" >/tmp/device-onboard-smoke.out 2>&1; then
+    printf 'device-harness should fail without configuration\n' >&2
     exit 1
 fi
 grep -q '还没有设备接入配置' /tmp/device-onboard-smoke.out
@@ -39,9 +39,6 @@ EOF
 FAKE_SSH_LOG="$TMP_HOME/ssh.log" PATH="$FAKE_BIN:$PATH" HOME="$TMP_HOME" DEVICE_ONBOARD_CONFIG_FILE="$TMP_HOME/config/config" sh "$ROOT/bin/device-tunnel"
 grep -q 'onboard-tunnel-test' "$TMP_HOME/ssh.log"
 grep -q '反向隧道已建立' "$TMP_HOME/ssh.log"
-
-FAKE_SSH_LOG="$TMP_HOME/ssh.log" PATH="$FAKE_BIN:$PATH" HOME="$TMP_HOME" DEVICE_ONBOARD_CONFIG_FILE="$TMP_HOME/config/config" sh "$ROOT/bin/server-harness" codex --version
-grep -q -- '-t onboard-server-test codex --version' "$TMP_HOME/ssh.log"
 
 # --- 平台识别 ---
 

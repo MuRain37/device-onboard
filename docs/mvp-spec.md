@@ -65,7 +65,7 @@ flowchart TD
     O -- 是 --> P[显示日常命令]
     P --> Q{用户之后运行哪个命令?}
     Q -- 保持反向连接 --> R[device-tunnel 前台运行]
-    Q -- 启动远程 Harness --> S[server-harness codex]
+    Q -- 启动远程 Harness --> S[ssh onboard-server-&lt;设备名&gt; codex]
     Q -- 普通服务器 shell --> T[ssh 服务器 Host]
 ```
 
@@ -83,7 +83,7 @@ sh ./install.sh
 
 ```sh
 device-tunnel
-server-harness codex
+ssh onboard-server-<设备名> codex
 ssh onboard-server-<设备名>
 ```
 
@@ -91,7 +91,7 @@ ssh onboard-server-<设备名>
 
 ### 1. 启动与预检查
 
-用户运行 `sh ./install.sh`。脚本检查当前系统是否为 macOS，并确认 `ssh`、`ssh-keygen` 可用、`~/.ssh` 可访问；随后安装 `device-tunnel` 和 `server-harness` 命令。首次安装且没有设备档案时，安装脚本直接进入接入菜单。
+用户运行 `sh ./install.sh`。脚本检查当前系统是否为 macOS，并确认 `ssh`、`ssh-keygen` 可用、`~/.ssh` 可访问；随后安装 `device-tunnel` 和 `device-harness` 命令。首次安装且没有设备档案时，安装脚本直接进入接入菜单。
 
 预检查失败时，脚本显示具体缺项并退出，不修改文件。
 
@@ -142,7 +142,8 @@ ssh onboard-server-<设备名>
 ## 接入成功后的命令
 
 - `device-tunnel`：以前台方式启动反向 SSH 隧道，按 `Ctrl-C` 结束。
-- `server-harness codex`：通过 SSH 在服务器启动 Codex；也可传入其他已安装在服务器上的 Harness 命令，例如 `server-harness claude`。
+- `ssh onboard-server-<设备名> codex`：通过 SSH 在服务器启动 Codex；也可传入其他已安装在服务器上的 Harness 命令，例如 `ssh onboard-server-<设备名> claude`。
+- `device-harness`：一键编排（起反向隧道 + 在服务器上跑 harness，默认 codex），隧道与 harness 同生共死。
 - `ssh onboard-server-<设备名>`：进入普通服务器 shell。
 
 本机已有一个名为 `tunnel` 的独立命令，因此新工具使用 `device-tunnel`，不覆盖现有命令。底层仍使用普通服务器 SSH Host，并配置 `RemoteForward`；命令以前台方式运行，端口冲突时立即失败，按 `Ctrl-C` 断开。接入程序还会通过服务器回连设备完成端到端检查。
@@ -152,16 +153,16 @@ ssh onboard-server-<设备名>
 ```sh
 ssh onboard-server-<设备名>
 ssh -N onboard-tunnel-<设备名>
-server-harness codex
+ssh onboard-server-<设备名> codex
 ```
 
-Harness 启动命令是一个独立的本地命令，不是每个 Harness 单独生成一个 SSH Host。它通过设备配置选择服务器连接，并以前台交互 SSH 启动远程 Harness；SSH 断开后 Harness 进程结束。
+Harness 通过普通服务器 Host 以交互式 SSH 启动，不为每个 Harness 单独生成一个 SSH Host。想要「起隧道 + 跑 harness」一步到位时用 `device-harness`：它负责隧道与 harness 两条进程的生命期，退出时一起收干净；SSH 断开后远程 Harness 进程随之结束。
 
 ## 流程边界
 
 - 首次运行 `install.sh` 会安装本地命令并完成设备接入；检测到已有设备档案时只更新本地命令并显示日常命令。
 - 反向隧道由 `device-tunnel` 前台运行，不后台保活。
-- Harness 通过 `server-harness <命令>` 启动；首版不维护 Harness 注册表。
+- Harness 用普通服务器 Host（`ssh onboard-server-<设备名> <命令>`）启动，或用 `device-harness` 一键起隧道 + 跑 harness；首版不维护 Harness 注册表。
 - 首次接入以外不做自动恢复；中断后重新运行脚本，从接入流程开始。
 - 失败时清理本次新增内容；已有配置通过备份恢复。
 
