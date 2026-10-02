@@ -518,12 +518,34 @@ server_key_name: $device_id-server
 $skill_end
 EOF
 )
+# 共享约定。**必须放在设备块之外**：档案是多设备共用的，写进某一个设备块里，
+# 第二台设备接进来时就看不到了。
+conv_begin='<!-- DEVICE-ONBOARD-CONVENTION BEGIN -->'
+conv_end='<!-- DEVICE-ONBOARD-CONVENTION END -->'
+conv_block=$(cat <<EOF
+$conv_begin
+## 本次会话来自哪台设备
+
+如果本次会话是被 \`device-harness\` 拉起来的，环境里带着两个变量：
+
+    DEVICE_ONBOARD_ID=<设备名>                        例如 xiaomi
+    DEVICE_ONBOARD_DEVICE_ALIAS=onboard-device-<设备名>
+
+也就是说：这台服务器对面的那一侧，就是发起本次会话的那台设备。可以直接回去：
+
+    ssh "\$DEVICE_ONBOARD_DEVICE_ALIAS"
+
+没有这两个变量，说明本次会话不是从设备侧（device-harness）进来的，例如手动 ssh 上来。
+$conv_end
+EOF
+)
 skill_dir_remote='$HOME/.agents/skills/device-onboard'
 skill_file_remote="$skill_dir_remote/SKILL.md"
 
 if server_ssh "test -f \"$skill_file_remote\"" 2>/dev/null; then
     # 已有档案：只替换本设备那一块，其它内容原样保留
-    printf '%s\n' "$skill_block" | server_ssh "set -eu; file=\"$skill_file_remote\"; tmp=\"\$(mktemp)\"; awk -v begin='$skill_begin' -v end='$skill_end' '\$0 == begin {skip=1; next} \$0 == end {skip=0; next} !skip {print}' \"\$file\" > \"\$tmp\"; cp \"\$file\" \"\$file.device-onboard.bak\"; cat >> \"\$tmp\"; mv \"\$tmp\" \"\$file\""
+    printf '%s\n' "$conv_block
+$skill_block" | server_ssh "set -eu; file=\"$skill_file_remote\"; tmp=\"\$(mktemp)\"; awk -v begin='$conv_begin' -v end='$conv_end' '\$0 == begin {skip=1; next} \$0 == end {skip=0; next} !skip {print}' \"\$file\" | awk -v begin='$skill_begin' -v end='$skill_end' '\$0 == begin {skip=1; next} \$0 == end {skip=0; next} !skip {print}' > \"\$tmp\"; cp \"\$file\" \"\$file.device-onboard.bak\"; cat >> \"\$tmp\"; mv \"\$tmp\" \"\$file\""
 else
     # 新档案：头部在本地拼好（带 frontmatter，真换行），整体送过去落盘。
     # 不在远端用 printf 拼 —— 那需要多层反斜杠转义，极易写出乱码。
@@ -531,9 +553,11 @@ else
     {
         printf -- '---\n'
         printf -- 'name: device-onboard\n'
-        printf -- 'description: SSH devices registered on this server (ports, keys, aliases).\n'
+        printf -- 'description: SSH devices on this server (incl. which one this session is from).\n'
         printf -- '---\n\n'
         printf -- '# Device Onboard\n\n'
+        printf '%s\n' "$conv_block"
+        printf '\n'
         printf '%s\n' "$skill_block"
     } | server_ssh "set -eu; dir=\"$skill_dir_remote\"; mkdir -p \"\$dir\"; cat > \"\$dir/SKILL.md\"; chmod 600 \"\$dir/SKILL.md\""
 fi

@@ -236,6 +236,11 @@ env FAKE_SSH_LOG="$TMP_HOME/hh.log" TERMUX_VERSION=0.118 \
 
 grep -q '隧道就绪' "$TMP_HOME/hh.out" || { printf '没等到隧道就绪：\n'; sed 's/^/  /' "$TMP_HOME/hh.out" >&2; exit 1; }
 grep -q 'echo-test' "$TMP_HOME/hh.log" || { printf '没在服务器上跑 harness\n' >&2; exit 1; }
+grep -q "DEVICE_ONBOARD_DEVICE_ALIAS='onboard-device-xiaomitest'" "$TMP_HOME/hh.log" || {
+    printf '没把设备身份传给 harness\n' >&2
+    sed 's/^/  /' "$TMP_HOME/hh.log" >&2
+    exit 1
+}
 grep -q '已收起' "$TMP_HOME/hh.out" || { printf '退出时没收隧道：\n'; sed 's/^/  /' "$TMP_HOME/hh.out" >&2; exit 1; }
 
 # --- 中途失败必须自动回滚：只撤本次改动，别碰别人的配置 ---

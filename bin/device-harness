@@ -15,6 +15,8 @@ fi
 . "$CONFIG_FILE"
 : "${TUNNEL_HOST_ALIAS:?配置缺少 TUNNEL_HOST_ALIAS}"
 : "${SERVER_HOST_ALIAS:?配置缺少 SERVER_HOST_ALIAS}"
+: "${DEVICE_ID:?配置缺少 DEVICE_ID}"
+: "${DEVICE_HOST_ALIAS:?配置缺少 DEVICE_HOST_ALIAS}"
 
 HARNESS_CMD=codex
 if [ "$#" -gt 0 ]; then
@@ -75,4 +77,8 @@ if ! grep -q '反向隧道已建立' "$READY_FILE" 2>/dev/null; then
 fi
 
 printf '隧道就绪。在服务器上启动 %s（退出后隧道自动收起）…\n\n' "$HARNESS_CMD"
-ssh -t "$SERVER_HOST_ALIAS" "$HARNESS_CMD" "$@"
+
+# 把「本次会话来自哪台设备」交给 harness。变量名和用法写在服务器上那份设备档案里，
+# 而档案的 description 在会话一开始就可见 —— 所以 harness 知道该来查这两个变量。
+ssh -t "$SERVER_HOST_ALIAS" \
+    "DEVICE_ONBOARD_ID='$DEVICE_ID' DEVICE_ONBOARD_DEVICE_ALIAS='$DEVICE_HOST_ALIAS' $HARNESS_CMD $*"
