@@ -224,6 +224,19 @@ fi
 reverse_port_start=${DEVICE_ONBOARD_REVERSE_PORT_START:-2230}
 reverse_port_end=${DEVICE_ONBOARD_REVERSE_PORT_END:-2299}
 
+# 真跑一次「服务器 → 隧道 → 本机」的握手。
+# 端口绑上只说明转发建立成功，不等于通道真的通 —— 所以要真连回来。
+reverse_forward_works() {
+    probe_port=$1
+    out=$(server_ssh "ssh -p $probe_port -i \"\$HOME/.ssh/device-onboard/${device_id}-server\" \
+        -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null \
+        -o ConnectTimeout=8 ${device_user}@127.0.0.1 'printf %s DEVICE-ONBOARD-E2E-OK'" 2>&1) || true
+    case "$out" in
+        *DEVICE-ONBOARD-E2E-OK*) e2e_last_error=; return 0 ;;
+        *) e2e_last_error=$out; return 1 ;;
+    esac
+}
+
 # Termux 上 /tmp 不可写（Android 限制），必须用 $TMPDIR；再不行退回配置目录。
 probe_log_dir=${TMPDIR:-/tmp}
 if [ ! -d "$probe_log_dir" ] || [ ! -w "$probe_log_dir" ]; then
@@ -237,8 +250,16 @@ while [ "$port" -le "$reverse_port_end" ]; do
     tunnel_pid=$!
     sleep 1
     if kill -0 "$tunnel_pid" 2>/dev/null; then
-        reverse_port=$port
-        break
+        # 端口绑上了。但「绑上」不等于「通了」—— 真握手一次再定。
+        if reverse_forward_works "$port"; then
+            reverse_port=$port
+            break
+        fi
+        kill "$tunnel_pid" 2>/dev/null || true
+        wait "$tunnel_pid" 2>/dev/null || true
+        tunnel_pid=
+        printf '\n端口 %s 的转发绑上了，但反向握手失败：\n%s\n' "$port" "$e2e_last_error" >&2
+        die "反向通道不通 —— 换端口没用（端口不是原因）。请检查目标机 sshd 是否在跑、服务器的公钥是否装进目标机。"
     fi
     wait "$tunnel_pid" 2>/dev/null || true
     tunnel_pid=

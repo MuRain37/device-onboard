@@ -190,4 +190,39 @@ printf '0\n' | TERMUX_VERSION=0.118 PATH="$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
 grep -q '找不到本设备' /tmp/device-onboard-smoke.out
 rm -f "$TMP_HOME/.ssh/config" "$TMP_HOME/.ssh/config.before"
 
+# --- 完整跑一遍接入（假 ssh），并验证生成的配置真能被 ssh 解析 ---
+# 这组是昨晚那串坑的回归防线：配置块写法、PATH、e2e 握手、状态文件。
+
+cat > "$FAKE_BIN/ssh" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_SSH_LOG"
+case "$*" in
+    *DEVICE-ONBOARD-E2E-OK*) printf 'DEVICE-ONBOARD-E2E-OK' ;;
+esac
+case "$*" in
+    *-R*localhost*) exec sleep 30 ;;
+esac
+exit 0
+EOF
+chmod 755 "$FAKE_BIN/ssh"
+
+mkdir -p "$TMP_HOME/p9"
+: > "$TMP_HOME/full.log"
+printf '1\nxiaomitest\n134.175.91.169\nubuntu\n22\n' | env FAKE_SSH_LOG="$TMP_HOME/full.log" TERMUX_VERSION=0.118 PATH="$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
+    DEVICE_ONBOARD_REVERSE_PORT_START=2230 DEVICE_ONBOARD_REVERSE_PORT_END=2230 \
+    DEVICE_ONBOARD_CONFIG_DIR="$TMP_HOME/p9" DEVICE_ONBOARD_KEY_DIR="$TMP_HOME/k9" DEVICE_ONBOARD_BIN_DIR="$TMP_HOME/b9" \
+    sh "$ROOT/install.sh" >/tmp/device-onboard-smoke.out 2>&1 || true
+
+grep -q '设备接入完成' /tmp/device-onboard-smoke.out
+grep -q 'DEVICE-ONBOARD-E2E-OK' "$TMP_HOME/full.log"
+[ -f "$TMP_HOME/p9/config" ] || { printf '状态文件没写出来\n' >&2; exit 1; }
+grep -q 'Host onboard-tunnel-xiaomitest' "$TMP_HOME/.ssh/config" || { printf '反向隧道 Host 没写进配置\n' >&2; exit 1; }
+
+# 生成的配置必须能被真 ssh 解析 —— 昨晚就是这条把整台设备弄瘸的
+if ! ssh -F "$TMP_HOME/.ssh/config" -G onboard-tunnel-xiaomitest >/dev/null 2>&1; then
+    printf '生成的 ~/.ssh/config 解析不过：\n' >&2
+    ssh -F "$TMP_HOME/.ssh/config" -G onboard-tunnel-xiaomitest 2>&1 | head -3 >&2
+    exit 1
+fi
+
 printf 'smoke tests passed\n'
