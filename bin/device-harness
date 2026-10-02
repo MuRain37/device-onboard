@@ -18,6 +18,15 @@ fi
 : "${DEVICE_ID:?配置缺少 DEVICE_ID}"
 : "${DEVICE_HOST_ALIAS:?配置缺少 DEVICE_HOST_ALIAS}"
 
+# 工作目录：device-harness -C <目录> [命令]
+# 目录可以指向 sshfs 挂进来的手机目录 —— 这样服务器上的 harness 就直接在手机的
+# 文件夹里干活（实测：codex -C 挂载点写出的文件会真的落在手机上）。
+DIR=
+if [ "${1:-}" = "-C" ] && [ "$#" -ge 2 ]; then
+    DIR=$2
+    shift 2
+fi
+
 HARNESS_CMD=codex
 if [ "$#" -gt 0 ]; then
     HARNESS_CMD=$1
@@ -28,9 +37,20 @@ fi
 # 启动那一刻的环境 —— 所以 ssh 带过去的 DEVICE_ONBOARD_* 到不了它的工具手上
 # （实测：工具 shell 里的 SSH_CLIENT 与两天前的守护进程逐字一致）。
 # --no-daemon 让它在本次会话的进程里执行工具，环境变量就有效了。
+# 用前缀匹配而不是精确匹配：写成 `codex --model X` 时也要带上。
 case "$HARNESS_CMD" in
-    codex) HARNESS_CMD='codex --no-daemon' ;;
+    codex*) HARNESS_CMD="$HARNESS_CMD --no-daemon" ;;
 esac
+
+# codex 用它自己的 -C 指定工作目录；别的命令就 cd 过去再跑。
+if [ -n "$DIR" ]; then
+    case "$HARNESS_CMD" in
+        codex*) RUN_CMD="$HARNESS_CMD -C '$DIR' $*" ;;
+        *)      RUN_CMD="cd '$DIR' && $HARNESS_CMD $*" ;;
+    esac
+else
+    RUN_CMD="$HARNESS_CMD $*"
+fi
 
 # device-tunnel 正常装在 PATH 里；找不到就退回脚本自己所在的目录。
 TUNNEL_BIN=$(command -v device-tunnel 2>/dev/null || true)
@@ -89,4 +109,4 @@ printf '隧道就绪。在服务器上启动 %s（退出后隧道自动收起）
 # 把「本次会话来自哪台设备」交给 harness。变量名和用法写在服务器上那份设备档案里，
 # 而档案的 description 在会话一开始就可见 —— 所以 harness 知道该来查这两个变量。
 ssh -t "$SERVER_HOST_ALIAS" \
-    "DEVICE_ONBOARD_ID='$DEVICE_ID' DEVICE_ONBOARD_DEVICE_ALIAS='$DEVICE_HOST_ALIAS' $HARNESS_CMD $*"
+    "DEVICE_ONBOARD_ID='$DEVICE_ID' DEVICE_ONBOARD_DEVICE_ALIAS='$DEVICE_HOST_ALIAS' $RUN_CMD"

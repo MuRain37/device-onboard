@@ -232,12 +232,17 @@ mkdir -p "$TMP_HOME/hh"
 env FAKE_SSH_LOG="$TMP_HOME/hh.log" TERMUX_VERSION=0.118 \
     PATH="$TMP_HOME/b9:$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
     DEVICE_ONBOARD_CONFIG_FILE="$TMP_HOME/p9/config" \
-    sh "$TMP_HOME/b9/device-harness" codex > "$TMP_HOME/hh.out" 2>&1 || true
+    sh "$TMP_HOME/b9/device-harness" -C /somewhere codex > "$TMP_HOME/hh.out" 2>&1 || true
 
 grep -q '隧道就绪' "$TMP_HOME/hh.out" || { printf '没等到隧道就绪：\n'; sed 's/^/  /' "$TMP_HOME/hh.out" >&2; exit 1; }
 grep -q 'codex --no-daemon' "$TMP_HOME/hh.log" || { printf '没在服务器上按预期启动 codex\n' >&2; exit 1; }
 grep -q -- '--no-daemon' "$TMP_HOME/hh.log" || {
     printf '启动 codex 时没带 --no-daemon（否则环境变量到不了它的工具）\n' >&2
+    sed 's/^/  /' "$TMP_HOME/hh.log" >&2
+    exit 1
+}
+grep -q -- "-C '/somewhere'" "$TMP_HOME/hh.log" || {
+    printf 'device-harness -C 没把工作目录传给 codex\n' >&2
     sed 's/^/  /' "$TMP_HOME/hh.log" >&2
     exit 1
 }
