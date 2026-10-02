@@ -27,6 +27,15 @@ if [ "${1:-}" = "-C" ] && [ "$#" -ge 2 ]; then
     shift 2
 fi
 
+# 目录是「服务器上」的路径。~ 要留给服务器展开：
+# 如果写成 ~/phone，手机上那个 shell 会先把它展开成手机的路径（错），
+# 所以请用单引号：device-harness -C '~/phone'。这里再把 ~ 换成 $HOME，
+# 交给远端的 shell 去解析。
+case "$DIR" in
+    '~')    DIR='$HOME' ;;
+    '~/'*)  DIR="\$HOME/${DIR#\~/}" ;;
+esac
+
 HARNESS_CMD=codex
 if [ "$#" -gt 0 ]; then
     HARNESS_CMD=$1
@@ -44,9 +53,10 @@ esac
 
 # codex 用它自己的 -C 指定工作目录；别的命令就 cd 过去再跑。
 if [ -n "$DIR" ]; then
+    # 用双引号：这样 $DIR 里若是 $HOME，交给远端 shell 去展开。
     case "$HARNESS_CMD" in
-        codex*) RUN_CMD="$HARNESS_CMD -C '$DIR' $*" ;;
-        *)      RUN_CMD="cd '$DIR' && $HARNESS_CMD $*" ;;
+        codex*) RUN_CMD="$HARNESS_CMD -C \"$DIR\" $*" ;;
+        *)      RUN_CMD="cd \"$DIR\" && $HARNESS_CMD $*" ;;
     esac
 else
     RUN_CMD="$HARNESS_CMD $*"

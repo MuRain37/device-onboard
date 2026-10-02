@@ -241,7 +241,7 @@ grep -q -- '--no-daemon' "$TMP_HOME/hh.log" || {
     sed 's/^/  /' "$TMP_HOME/hh.log" >&2
     exit 1
 }
-grep -q -- "-C '/somewhere'" "$TMP_HOME/hh.log" || {
+grep -q -- '-C "/somewhere"' "$TMP_HOME/hh.log" || {
     printf 'device-harness -C 没把工作目录传给 codex\n' >&2
     sed 's/^/  /' "$TMP_HOME/hh.log" >&2
     exit 1
@@ -320,5 +320,18 @@ if [ -f "$TMP_HOME/p10/config" ]; then
     printf '回滚后状态文件仍然存在\n' >&2
     exit 1
 fi
+
+# ~ 开头的目录：应翻译成远端可展开的 $HOME（手机上先展开就错了）
+: > "$TMP_HOME/hh2.log"
+env FAKE_SSH_LOG="$TMP_HOME/hh2.log" TERMUX_VERSION=0.118 \
+    PATH="$TMP_HOME/b9:$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
+    DEVICE_ONBOARD_CONFIG_FILE="$TMP_HOME/p9/config" \
+    sh "$TMP_HOME/b9/device-harness" -C '~/phone' codex > "$TMP_HOME/hh2.out" 2>&1 || true
+
+grep -q -- '-C "$HOME/phone"' "$TMP_HOME/hh2.log" || {
+    printf 'device-harness 没有把 ~ 翻译成远端可展开的 $HOME\n' >&2
+    sed 's/^/  /' "$TMP_HOME/hh2.log" >&2
+    exit 1
+}
 
 printf 'smoke tests passed\n'
