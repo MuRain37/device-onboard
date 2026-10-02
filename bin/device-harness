@@ -203,8 +203,17 @@ if mountpoint -q "\$mp" 2>/dev/null; then
         fusermount -uz "\$mp" >/dev/null 2>&1 || true
     fi
 fi
-sshfs $DEVICE_HOST_ALIAS: "\$mp" -o reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,idmap=user,follow_symlinks >/dev/null 2>&1
-if _ls "\$mp"; then echo MOUNT_OK; else echo MOUNT_FAIL; fi
+# 绝不能拿「ls 空目录」当挂载成功的证据 —— 空目录 ls 也会成功，会假报 MOUNT_OK，
+# 接着 codex 在空挂载点上 chdir，得到「Error: No such file or directory (os error 2)」
+# （真机踩过）。必须用 mountpoint 验证，并且别再吞掉 sshfs 的报错，失败要看得到原因。
+# 注意：这里是未引用的 heredoc，命令替换要写成 \$( ) 转义形式，否则会在设备本地就执行 sshfs。
+mount_err=\$(sshfs $DEVICE_HOST_ALIAS: "\$mp" -o reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,idmap=user,follow_symlinks 2>&1) || true
+if mountpoint -q "\$mp" 2>/dev/null && _ls "\$mp"; then
+    echo MOUNT_OK
+else
+    echo MOUNT_FAIL
+    printf '%s\n' "\$mount_err" | head -3
+fi
 REMOTE_MOUNT_EOF
 )
     mount_out=$(printf '%s\n' "$mount_script" | ssh "$SERVER_HOST_ALIAS" 'sh -s' 2>&1 || true)
@@ -212,6 +221,9 @@ REMOTE_MOUNT_EOF
         *MOUNT_ALREADY*) printf '服务器 sshfs 挂载已就绪（~/%s）。\n' "$DEVICE_ID" ;;
         *MOUNT_OK*)      printf '已在服务器上挂好 sshfs（~/%s）。\n' "$DEVICE_ID" ;;
         *)
+            # 把 sshfs 的真实报错带出来，不然只剩一句「未就绪」，查不出原因。
+            _mnt_err=$(printf '%s' "$mount_out" | grep -v '^MOUNT_FAIL$' | grep -v '^$' | head -2 | tr '\n' ' ')
+            [ -n "$_mnt_err" ] && printf '警告：服务器 sshfs 挂载失败：%s\n' "$_mnt_err" >&2
             # 挂载不可用时绝不能把工作目录留在坏挂载上：codex 一 chdir 就
             # `Error: I/O error (os error 5)` 直接退出（实测，栈：僵死的 FUSE 挂载）。
             # 自动映射来的目录就退回服务器家目录并说清楚；显式 -C 是用户点的，只警告。

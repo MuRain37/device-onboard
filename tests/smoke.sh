@@ -19,11 +19,14 @@ chmod 755 "$FAKE_BIN/ssh"
 cat > "$FAKE_BIN/sshfs" <<'EOF'
 #!/bin/sh
 if [ -n "${FAKE_SSHFS_LOG:-}" ]; then printf '%s\n' "$*" >> "$FAKE_SSHFS_LOG"; fi
+# 假挂载成功：打个标记，让同一次运行里的 mountpoint 也能看见（真实挂载就是这么表现的）
+[ -n "${FAKE_MOUNT_MARKER:-}" ] && : > "$FAKE_MOUNT_MARKER"
 exit 0
 EOF
 cat > "$FAKE_BIN/mountpoint" <<'EOF'
 #!/bin/sh
 if [ -n "${FAKE_MOUNTPOINT_LOG:-}" ]; then printf '%s\n' "$*" >> "$FAKE_MOUNTPOINT_LOG"; fi
+[ -n "${FAKE_MOUNT_MARKER:-}" ] && [ -e "$FAKE_MOUNT_MARKER" ] && exit 0
 case "${FAKE_MOUNT_STATE:-unmounted}" in
     mounted) exit 0 ;;
     *)       exit 1 ;;
@@ -305,11 +308,13 @@ harness_mount_case() {
     _state=$2
     : > "$TMP_HOME/mount-$_name-sshfs.log"
     : > "$TMP_HOME/mount-$_name-mountpoint.log"
+    rm -f "$TMP_HOME/mount-$_name.fusemarker"
     : > "$TMP_HOME/mount-$_name-fusermount.log"
     : > "$TMP_HOME/mount-$_name-ssh.log"
     env FAKE_MOUNT_STATE="$_state" \
         FAKE_SSHFS_LOG="$TMP_HOME/mount-$_name-sshfs.log" \
         FAKE_MOUNTPOINT_LOG="$TMP_HOME/mount-$_name-mountpoint.log" \
+        FAKE_MOUNT_MARKER="$TMP_HOME/mount-$_name.fusemarker" \
         FAKE_FUSERMOUNT_LOG="$TMP_HOME/mount-$_name-fusermount.log" \
         FAKE_SSH_LOG="$TMP_HOME/mount-$_name-ssh.log" \
         TERMUX_VERSION=0.118 PATH="$TMP_HOME/b9:$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
@@ -366,7 +371,9 @@ auto_case() {
     _acwd=$2
     shift 2
     : > "$TMP_HOME/auto-$_an.log"
+    rm -f "$TMP_HOME/auto-$_an.fusemarker"
     ( cd "$_acwd" && env FAKE_SSH_LOG="$TMP_HOME/auto-$_an.log" TERMUX_VERSION=0.118 \
+        FAKE_MOUNT_MARKER="$TMP_HOME/auto-$_an.fusemarker" \
         PATH="$TMP_HOME/b9:$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
         DEVICE_ONBOARD_CONFIG_FILE="$TMP_HOME/p9/config" \
         sh "$TMP_HOME/b9/device-harness" "$@" ) > "$TMP_HOME/auto-$_an.out" 2>&1 || true
@@ -617,6 +624,16 @@ grep -q -- '-C "\$HOME"' "$TMP_HOME/hh4.log" || {
 if grep -q -- '-C "\$HOME/' "$TMP_HOME/hh4.log"; then
     printf '挂载不可用却仍把工作目录指向挂载点（会 I/O error）：\n' >&2
     sed 's/^/  /' "$TMP_HOME/hh4.log" >&2
+    exit 1
+fi
+
+# 回归防护：挂载成功不能靠 ls 判定（空目录 ls 也成功 → 假 OK → codex ENOENT）
+if ! grep -qF 'if mountpoint -q "\$mp" 2>/dev/null && _ls "\$mp"; then' "$ROOT/bin/device-harness"; then
+    printf '挂载成功判定没用 mountpoint（空目录会被误判为挂载成功）\n' >&2
+    exit 1
+fi
+if grep -q 'sshfs .*>/dev/null 2>&1' "$ROOT/bin/device-harness"; then
+    printf 'sshfs 的报错又被丢进 /dev/null 了（失败原因看不到）\n' >&2
     exit 1
 fi
 
