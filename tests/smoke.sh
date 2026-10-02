@@ -563,4 +563,29 @@ if [ -s "$TMP_HOME/skip-sshfs.log" ]; then
     exit 1
 fi
 
+# --no-map：不跟随本机目录，命令里不该出现 -C
+cat > "$FAKE_BIN/ssh" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_SSH_LOG"
+case "$*" in
+    *反向隧道已建立*) printf '✅ 反向隧道已建立\n'; exec sleep 30 ;;
+esac
+exit 0
+EOF
+chmod 755 "$FAKE_BIN/ssh"
+: > "$TMP_HOME/hh3.log"
+env FAKE_SSH_LOG="$TMP_HOME/hh3.log" TERMUX_VERSION=0.118 \
+    PATH="$TMP_HOME/b9:$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
+    DEVICE_ONBOARD_CONFIG_FILE="$TMP_HOME/p9/config" \
+    sh "$TMP_HOME/b9/device-harness" --no-map codex > "$TMP_HOME/hh3.out" 2>&1 || true
+
+grep -q 'codex --no-daemon' "$TMP_HOME/hh3.log" || {
+    printf '--no-map 时没正常启动 codex\n' >&2; sed 's/^/  /' "$TMP_HOME/hh3.log" >&2; exit 1
+}
+if grep -q -- '-C ' "$TMP_HOME/hh3.log"; then
+    printf '--no-map 时仍然带了 -C（不该跟随本机路径）\n' >&2
+    sed 's/^/  /' "$TMP_HOME/hh3.log" >&2
+    exit 1
+fi
+
 printf 'smoke tests passed\n'

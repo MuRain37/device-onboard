@@ -18,20 +18,37 @@ fi
 : "${DEVICE_ID:?配置缺少 DEVICE_ID}"
 : "${DEVICE_HOST_ALIAS:?配置缺少 DEVICE_HOST_ALIAS}"
 
-# 工作目录：device-harness -C <目录> [命令]
-# 目录可以指向 sshfs 挂进来的手机目录 —— 这样服务器上的 harness 就直接在手机的
-# 文件夹里干活（实测：codex -C 挂载点写出的文件会真的落在手机上）。
+# 选项：
+#   -C <目录>   指定服务器上的工作目录（可指向 sshfs 挂进来的手机目录）
+#   --no-map    不跟随本机目录，harness 就用服务器家目录（不想要的自动映射可以关掉）
+# 之后第一个参数是 harness 命令，剩余参数原样传给它。
 DIR=
-if [ "${1:-}" = "-C" ] && [ "$#" -ge 2 ]; then
-    DIR=$2
-    shift 2
-fi
+NO_MAP=0
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -C)
+            if [ "$#" -lt 2 ]; then
+                printf '错误：-C 后面要跟一个目录（服务器上的路径）。\n' >&2
+                exit 2
+            fi
+            DIR=$2
+            shift 2
+            ;;
+        --no-map)
+            NO_MAP=1
+            shift
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
 
 # 没给 -C 时，按设备侧当前目录自动映射到服务器挂载点：
 #   设备 $HOME  ↔  服务器 ~/<设备ID>（sshfs 挂载点）
 # 这样 cd ~/项目 && device-harness 一条命令就够，不用手写 -C，也不用自己换算。
-# 显式 -C 优先级最高：只有 DIR 仍为空时才自动推导。
-if [ -z "$DIR" ]; then
+# 显式 -C 优先级最高；--no-map 直接放弃自动映射（DIR 留空 = 用服务器家目录）。
+if [ -z "$DIR" ] && [ "$NO_MAP" = 0 ]; then
     _dev_home=$HOME
     # 去掉家目录末尾的斜杠，免得拼出 //。
     case "$_dev_home" in
