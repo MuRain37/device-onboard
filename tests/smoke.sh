@@ -200,6 +200,9 @@ case "$*" in
     *DEVICE-ONBOARD-E2E-OK*) printf 'DEVICE-ONBOARD-E2E-OK' ;;
 esac
 case "$*" in
+    *反向隧道已建立*) printf '✅ 反向隧道已建立\n'; exec sleep 30 ;;
+esac
+case "$*" in
     *-R*localhost*) exec sleep 30 ;;
 esac
 exit 0
@@ -224,5 +227,18 @@ if ! ssh -F "$TMP_HOME/.ssh/config" -G onboard-tunnel-xiaomitest >/dev/null 2>&1
     ssh -F "$TMP_HOME/.ssh/config" -G onboard-tunnel-xiaomitest 2>&1 | head -3 >&2
     exit 1
 fi
+
+# --- device-harness：一键（后台隧道 + 前台 harness + 退出收尾）---
+
+mkdir -p "$TMP_HOME/hh"
+: > "$TMP_HOME/hh.log"
+env FAKE_SSH_LOG="$TMP_HOME/hh.log" TERMUX_VERSION=0.118 \
+    PATH="$TMP_HOME/b9:$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
+    DEVICE_ONBOARD_CONFIG_FILE="$TMP_HOME/p9/config" \
+    sh "$TMP_HOME/b9/device-harness" echo-test > "$TMP_HOME/hh.out" 2>&1 || true
+
+grep -q '隧道就绪' "$TMP_HOME/hh.out" || { printf '没等到隧道就绪：\n'; sed 's/^/  /' "$TMP_HOME/hh.out" >&2; exit 1; }
+grep -q 'echo-test' "$TMP_HOME/hh.log" || { printf '没在服务器上跑 harness\n' >&2; exit 1; }
+grep -q '已收起' "$TMP_HOME/hh.out" || { printf '退出时没收隧道：\n'; sed 's/^/  /' "$TMP_HOME/hh.out" >&2; exit 1; }
 
 printf 'smoke tests passed\n'

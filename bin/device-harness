@@ -1,0 +1,84 @@
+#!/bin/sh
+# 一条命令做完两件事：起反向隧道 + 在服务器上跑 harness（默认 codex）。
+# 两者同生共死 —— harness 一退出（或按 Ctrl-C），隧道跟着收掉。
+#
+# 分成两个命令不行就在于「生命期」：隧道是后台长跑，harness 是前台交互，
+# 中间断了谁都发现不了。这里把它们绑一起，退出时一定收干净。
+set -eu
+
+CONFIG_FILE=${DEVICE_ONBOARD_CONFIG_FILE:-"$HOME/.config/device-onboard/config"}
+if [ ! -f "$CONFIG_FILE" ]; then
+    printf '错误：还没有设备接入配置，请先运行 install.sh。\n' >&2
+    exit 1
+fi
+# shellcheck source=/dev/null
+. "$CONFIG_FILE"
+: "${TUNNEL_HOST_ALIAS:?配置缺少 TUNNEL_HOST_ALIAS}"
+: "${SERVER_HOST_ALIAS:?配置缺少 SERVER_HOST_ALIAS}"
+
+HARNESS_CMD=codex
+if [ "$#" -gt 0 ]; then
+    HARNESS_CMD=$1
+    shift
+fi
+
+# 正常两个命令都装在同一个目录、都在 PATH 里；找不到就退回脚本自己所在的目录。
+TUNNEL_BIN=$(command -v device-tunnel 2>/dev/null || true)
+HARNESS_BIN=$(command -v server-harness 2>/dev/null || true)
+[ -n "$TUNNEL_BIN" ] || TUNNEL_BIN=$(dirname "$0")/device-tunnel
+[ -n "$HARNESS_BIN" ] || HARNESS_BIN=$(dirname "$0")/server-harness
+if [ ! -x "$TUNNEL_BIN" ]; then
+    printf '错误：找不到 device-tunnel，请先跑 install.sh 装好本地命令。\n' >&2
+    exit 1
+fi
+if [ ! -x "$HARNESS_BIN" ]; then
+    printf '错误：找不到 server-harness，请先跑 install.sh 装好本地命令。\n' >&2
+    exit 1
+fi
+
+# 隧道这次跑在后台，前台留给 harness —— 所以更要拿住唤醒锁，
+# 否则 Android 会把整个 App 冻上，隧道看着还在、实际已经握手不能了。
+if [ -n "${TERMUX_VERSION:-}" ]; then
+    command -v termux-wake-lock >/dev/null 2>&1 && termux-wake-lock >/dev/null 2>&1 || true
+fi
+
+# 就绪信号不靠「端口在不在听」，而是等隧道自己打出的那行「✅ 反向隧道已建立」——
+# 那是服务器亲口说的（Host 块里 ExitOnForwardFailure yes：转发真绑上才会执行到那行）。
+# Termux 上 /tmp 不可写，临时文件必须用 $TMPDIR。
+READY_FILE=$(mktemp "${TMPDIR:-/tmp}/device-harness.XXXXXX" 2>/dev/null || mktemp)
+tunnel_pid=
+
+cleanup() {
+    if [ -n "$tunnel_pid" ] && kill -0 "$tunnel_pid" 2>/dev/null; then
+        kill "$tunnel_pid" 2>/dev/null || true
+        wait "$tunnel_pid" 2>/dev/null || true
+        printf '\n隧道已收起。\n'
+    fi
+    [ -f "$READY_FILE" ] && rm -f "$READY_FILE"
+}
+trap cleanup EXIT INT TERM
+
+printf '正在建立反向 SSH 隧道…\n'
+"$TUNNEL_BIN" >"$READY_FILE" 2>&1 </dev/null &
+tunnel_pid=$!
+
+waited=0
+while [ "$waited" -lt 60 ]; do
+    grep -q '反向隧道已建立' "$READY_FILE" 2>/dev/null && break
+    if ! kill -0 "$tunnel_pid" 2>/dev/null; then
+        printf '隧道进程退出了，没等到就绪。输出：\n' >&2
+        sed 's/^/    /' "$READY_FILE" >&2
+        exit 1
+    fi
+    sleep 1
+    waited=$((waited + 1))
+done
+
+if ! grep -q '反向隧道已建立' "$READY_FILE" 2>/dev/null; then
+    printf '等了 %s 秒没等到隧道就绪。最后几行输出：\n' "$waited" >&2
+    tail -5 "$READY_FILE" | sed 's/^/    /' >&2
+    exit 1
+fi
+
+printf '隧道就绪。在服务器上启动 %s（退出后隧道自动收起）…\n\n' "$HARNESS_CMD"
+"$HARNESS_BIN" "$HARNESS_CMD" "$@"

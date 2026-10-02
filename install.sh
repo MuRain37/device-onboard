@@ -105,6 +105,7 @@ copy_command() {
 }
 copy_command "$PROJECT_DIR/bin/device-tunnel" "$BIN_DIR/device-tunnel"
 copy_command "$PROJECT_DIR/bin/server-harness" "$BIN_DIR/server-harness"
+copy_command "$PROJECT_DIR/bin/device-harness" "$BIN_DIR/device-harness"
 
 # 装的目录若不在 PATH 里，明说怎么加 —— 别让人对着 command not found 发懵。
 case ":$PATH:" in
@@ -126,7 +127,7 @@ if [ -f "$STATE_FILE" ]; then
         printf '   修复：删掉状态文件后重跑，脚本会照常重新生成 ——\n'
         printf '     rm -rf %s && sh install.sh\n' "$CONFIG_DIR"
     fi
-    printf '日常命令：device-tunnel、server-harness <命令>\n'
+    printf '日常命令：device-harness（一键：隧道 + harness）、device-tunnel、server-harness <命令>\n'
     exit 0
 fi
 
@@ -400,5 +401,6 @@ trap - EXIT INT TERM
 
 printf '\n✅ 设备接入完成。\n'
 printf '普通服务器：ssh %s\n' "$server_alias"
+printf '一键（隧道 + harness）：device-harness\n'
 printf '反向隧道：device-tunnel\n'
 printf '远程 Harness：server-harness codex\n'
