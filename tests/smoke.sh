@@ -241,4 +241,72 @@ grep -q '隧道就绪' "$TMP_HOME/hh.out" || { printf '没等到隧道就绪：\
 grep -q 'echo-test' "$TMP_HOME/hh.log" || { printf '没在服务器上跑 harness\n' >&2; exit 1; }
 grep -q '已收起' "$TMP_HOME/hh.out" || { printf '退出时没收隧道：\n'; sed 's/^/  /' "$TMP_HOME/hh.out" >&2; exit 1; }
 
+# --- 中途失败必须自动回滚：只撤本次改动，别碰别人的配置 ---
+# 用假 ssh 让「写服务器 ~/.ssh/config」这一步返回非 0，流程应当在
+# 写完本地配置后就地失败，并由 EXIT trap 把本次新增的东西全部撤回。
+
+cat > "$FAKE_BIN/ssh" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_SSH_LOG"
+case "$*" in
+    *DEVICE-ONBOARD-E2E-OK*) printf 'DEVICE-ONBOARD-E2E-OK'; exit 0 ;;
+esac
+# 只让写服务器 ssh config 的那一步失败（命令串里带 file="$HOME/.ssh/config"）
+case "$*" in
+    *'file="$HOME/.ssh/config"'*) exit 1 ;;
+esac
+case "$*" in
+    *'-R'*'localhost'*) exec sleep 30 ;;
+esac
+exit 0
+EOF
+chmod 755 "$FAKE_BIN/ssh"
+
+# 重置到已知状态：keepme 不属于本设备，回滚后必须原样还在
+rm -f "$TMP_HOME/.ssh/config" "$TMP_HOME/.ssh/config.device-onboard.bak"
+rm -rf "$TMP_HOME/p10" "$TMP_HOME/k10"
+cat > "$TMP_HOME/.ssh/config" <<'EOF'
+Host keepme
+    HostName keep.example.com
+EOF
+
+rb_status=0
+printf '1\nrollbacktest\n203.0.113.9\nubuntu\n22\n' | env FAKE_SSH_LOG="$TMP_HOME/rollback.log" TERMUX_VERSION=0.118 PATH="$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
+    DEVICE_ONBOARD_REVERSE_PORT_START=2230 DEVICE_ONBOARD_REVERSE_PORT_END=2230 \
+    DEVICE_ONBOARD_CONFIG_DIR="$TMP_HOME/p10" DEVICE_ONBOARD_KEY_DIR="$TMP_HOME/k10" DEVICE_ONBOARD_BIN_DIR="$TMP_HOME/b10" \
+    sh "$ROOT/install.sh" >"$TMP_HOME/rollback.out" 2>&1 || rb_status=$?
+
+# ① 失败必须以非 0 退出
+if [ "$rb_status" = 0 ]; then
+    printf '接入中途失败却仍以 0 退出\n' >&2
+    exit 1
+fi
+# 回滚确实被触发
+if ! grep -q '开始回滚' "$TMP_HOME/rollback.out"; then
+    printf '失败后没有触发自动回滚：\n' >&2
+    sed 's/^/  /' "$TMP_HOME/rollback.out" >&2
+    exit 1
+fi
+# ② 本地配置里没有本设备的块
+if grep -q 'device-onboard:rollbacktest' "$TMP_HOME/.ssh/config"; then
+    printf '回滚后本地配置里仍残留本设备的块：\n' >&2
+    sed 's/^/  /' "$TMP_HOME/.ssh/config" >&2
+    exit 1
+fi
+# ⑤ 不属于本设备的内容没被误删
+if ! grep -q 'Host keepme' "$TMP_HOME/.ssh/config"; then
+    printf '回滚误删了与本设备无关的配置（keepme）\n' >&2
+    exit 1
+fi
+# ③ 本次生成的设备密钥已删除
+if [ -f "$TMP_HOME/k10/rollbacktest-device" ] || [ -f "$TMP_HOME/k10/rollbacktest-device.pub" ]; then
+    printf '回滚后本次生成的设备密钥仍然存在\n' >&2
+    exit 1
+fi
+# ④ 状态文件不存在
+if [ -f "$TMP_HOME/p10/config" ]; then
+    printf '回滚后状态文件仍然存在\n' >&2
+    exit 1
+fi
+
 printf 'smoke tests passed\n'

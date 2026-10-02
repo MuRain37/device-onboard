@@ -131,9 +131,167 @@ if [ -f "$STATE_FILE" ]; then
     exit 0
 fi
 
+# ---------- 失败回滚（仅首次接入路径） ----------
+# 设计裁决：按标记撤销本次新增内容 + 用备份还原已有配置，不引入事务日志/状态机。
+# 任何一步失败（die、set -e、Ctrl-C）都由 EXIT trap 收尾；成功时先置 INSTALL_OK=1 跳过回滚。
+ROLLBACK_ARMED=0
+ROLLBACK_DONE=0
+INSTALL_OK=0
+DEVICE_KEY_CREATED=0
+SERVER_KEY_CREATED=0
+SKILL_WAS_NEW=0
+device_id=
+device_key=
+tunnel_pid=
+probe_log=
+
+cleanup_tunnel() {
+    if [ -n "${tunnel_pid:-}" ]; then
+        kill "$tunnel_pid" 2>/dev/null || true
+        wait "$tunnel_pid" 2>/dev/null || true
+    fi
+    if [ -n "${probe_log:-}" ]; then
+        rm -f "$probe_log" 2>/dev/null || true
+    fi
+}
+
+rollback_note() { printf '  %s\n' "$*"; }
+
+# 只去掉本设备的块；返回 0 表示确实去掉了。
+strip_local_device_block() {
+    _cfg="$HOME/.ssh/config"
+    [ -f "$_cfg" ] || return 1
+    _begin="# >>> device-onboard:$device_id BEGIN"
+    grep -qF "$_begin" "$_cfg" 2>/dev/null || return 1
+    _tmp=$(mktemp) || return 1
+    awk -v b="$_begin" -v e="# <<< device-onboard:$device_id END" \
+        '$0 == b {skip=1; next} $0 == e {skip=0; next} !skip {print}' "$_cfg" > "$_tmp"
+    chmod 600 "$_tmp" 2>/dev/null || true
+    mv "$_tmp" "$_cfg"
+    return 0
+}
+
+rollback_local_config() {
+    _cfg="$HOME/.ssh/config"
+    if strip_local_device_block; then
+        rollback_note "已从 ~/.ssh/config 去掉本设备（$device_id）的配置块。"
+    else
+        rollback_note "本机 ~/.ssh/config 中没有本设备的配置块（无需去掉）。"
+    fi
+    if [ -f "$_cfg.device-onboard.bak" ]; then
+        if cp -p "$_cfg.device-onboard.bak" "$_cfg" 2>/dev/null; then
+            chmod 600 "$_cfg" 2>/dev/null || true
+            rollback_note "已用备份还原 ~/.ssh/config。"
+        else
+            rollback_note "警告：还原 ~/.ssh/config 备份失败。"
+        fi
+    fi
+}
+
+rollback_local_authorized_keys() {
+    _ak="$HOME/.ssh/authorized_keys"
+    [ -f "$_ak" ] || return 0
+    grep -qF "device-onboard:$device_id" "$_ak" 2>/dev/null || return 0
+    _tmp="$_ak.rollback.$$"
+    if grep -vF "device-onboard:$device_id" "$_ak" > "$_tmp" 2>/dev/null; then
+        chmod 600 "$_tmp" 2>/dev/null || true
+        mv "$_tmp" "$_ak"
+        rollback_note "已从本机 authorized_keys 去掉本设备的密钥行。"
+    else
+        rm -f "$_tmp" 2>/dev/null || true
+        rollback_note "警告：清理本机 authorized_keys 失败。"
+    fi
+}
+
+rollback_local_key() {
+    if [ "$DEVICE_KEY_CREATED" = 1 ] && [ -n "$device_key" ]; then
+        rm -f "$device_key" "$device_key.pub" 2>/dev/null || true
+        rollback_note "已删除本次生成的设备密钥（$device_key）。"
+    fi
+}
+
+# 远端回滚脚本通过 stdin 管道送过去，避免多层转义把命令拼错。
+rollback_server() {
+    if [ -z "$device_id" ] || [ ! -f "$device_key" ] || ! command -v server_ssh >/dev/null 2>&1; then
+        rollback_note "本机设备密钥或服务器连接不可用，跳过服务器端回滚（请登录服务器手动检查）。"
+        return 0
+    fi
+    _out=$(cat <<ROLLBACK_EOF | server_ssh 'sh -s' 2>&1
+set +e
+cfg="\$HOME/.ssh/config"
+if [ -f "\$cfg.device-onboard.bak" ]; then
+    cp -p "\$cfg.device-onboard.bak" "\$cfg" 2>/dev/null && chmod 600 "\$cfg" 2>/dev/null && echo RESTORED_SSH_CONFIG
+fi
+if [ -f "\$cfg" ] && grep -qF "# >>> device-onboard:$device_id BEGIN" "\$cfg" 2>/dev/null; then
+    t=\$(mktemp)
+    awk -v b="# >>> device-onboard:$device_id BEGIN" -v e="# <<< device-onboard:$device_id END" '\$0==b{skip=1;next} \$0==e{skip=0;next} !skip{print}' "\$cfg" > "\$t"
+    mv "\$t" "\$cfg" 2>/dev/null; chmod 600 "\$cfg" 2>/dev/null
+    echo STRIPPED_SSH_CONFIG
+fi
+ak="\$HOME/.ssh/authorized_keys"
+if [ -f "\$ak" ] && grep -qF "device-onboard:$device_id" "\$ak" 2>/dev/null; then
+    grep -vF "device-onboard:$device_id" "\$ak" > "\$ak.rollback" && mv "\$ak.rollback" "\$ak" && chmod 600 "\$ak" 2>/dev/null && echo REMOVED_AUTHORIZED_KEY
+fi
+skill="\$HOME/.agents/skills/device-onboard/SKILL.md"
+if [ "$SKILL_WAS_NEW" = 1 ]; then
+    if [ -f "\$skill" ]; then rm -f "\$skill" && echo REMOVED_SKILL_FILE; fi
+elif [ -f "\$skill" ] && grep -qF "<!-- DEVICE-ONBOARD:$device_id BEGIN -->" "\$skill" 2>/dev/null; then
+    t=\$(mktemp)
+    awk -v b="<!-- DEVICE-ONBOARD:$device_id BEGIN -->" -v e="<!-- DEVICE-ONBOARD:$device_id END -->" '\$0==b{skip=1;next} \$0==e{skip=0;next} !skip{print}' "\$skill" > "\$t"
+    mv "\$t" "\$skill" 2>/dev/null; chmod 600 "\$skill" 2>/dev/null
+    echo STRIPPED_SKILL_BLOCK
+fi
+if [ "$SERVER_KEY_CREATED" = 1 ]; then
+    rm -f "\$HOME/.ssh/device-onboard/${device_id}-server" "\$HOME/.ssh/device-onboard/${device_id}-server.pub" 2>/dev/null && echo REMOVED_SERVER_KEY
+fi
+ROLLBACK_EOF
+)
+    if [ -n "$_out" ]; then
+        rollback_note "服务器端回滚返回："
+        printf '%s\n' "$_out"
+    else
+        rollback_note "警告：服务器端回滚无输出（可能连接失败），请登录服务器手动检查。"
+    fi
+}
+
+perform_rollback() {
+    ROLLBACK_DONE=1
+    printf '\n接入未完成，开始回滚本次改动……\n'
+    rollback_server
+    rollback_local_config
+    rollback_local_authorized_keys
+    rollback_local_key
+    if [ -f "$CONFIG_DIR/server-key.pub" ]; then
+        rm -f "$CONFIG_DIR/server-key.pub" 2>/dev/null || true
+        rollback_note "已删除本次取回的服务器公钥副本。"
+    fi
+    if [ -f "$STATE_FILE" ]; then
+        rm -f "$STATE_FILE" 2>/dev/null || true
+        rollback_note "已删除本地状态文件。"
+    fi
+    printf '回滚完成。可能未撤净：服务器主机指纹记录、ssh-agent 中的密钥、失败点之前的远端临时文件。\n'
+}
+
+on_exit() {
+    _status=$?
+    trap - EXIT INT TERM
+    set +e
+    cleanup_tunnel
+    if [ "$ROLLBACK_ARMED" = 1 ] && [ "$INSTALL_OK" != 1 ] && [ "$ROLLBACK_DONE" != 1 ]; then
+        perform_rollback
+        _status=1
+    fi
+    exit "$_status"
+}
+# ------------------------------------------------
+
 # 只有真要重新接入时才动配置：先清掉自己以前留下的块（可能带着坏值），再做体检。
 # 顺序不能反 —— 坏块会让体检直接报错。
 strip_device_onboard_blocks
+
+# 已经进入首次接入：从此任何失败都由 EXIT trap 回滚本次改动。
+ROLLBACK_ARMED=1
+trap 'on_exit' EXIT INT TERM
 
 # 早发现早报错：~/.ssh/config 里若有坏行，之后每一次 ssh 都会失败，
 # 而报错指向的是那一行 —— 很容易让人误以为是本次操作搞坏的。
@@ -147,7 +305,9 @@ printf '1) 配置设备与服务器的 SSH 连接\n'
 printf '0) 退出\n\n'
 printf '请选择：'
 read -r choice
-[ "$choice" = "1" ] || exit 0
+# 用户在菜单直接退出：本次没有新增任何接入产物，视为正常结束，不走回滚
+# （否则会还原备份，把 strip 刚清掉的旧坏块又装回去）。
+[ "$choice" = "1" ] || { INSTALL_OK=1; exit 0; }
 
 default_name=$DEVICE_DEFAULT_NAME
 printf '设备名称 [%s]：' "$default_name"
@@ -186,6 +346,7 @@ mkdir -p "$HOME/.ssh" "$KEY_DIR"
 chmod 700 "$HOME/.ssh" "$KEY_DIR"
 if [ ! -f "$device_key" ]; then
     ssh-keygen -q -t ed25519 -N '' -f "$device_key" -C "device-onboard:$device_id"
+    DEVICE_KEY_CREATED=1
 fi
 chmod 600 "$device_key"
 
@@ -197,6 +358,13 @@ server_ssh() {
     ssh -i "$device_key" -o IdentitiesOnly=yes -p "$server_port" "$server_target" "$@"
 }
 
+# 服务器端回连密钥是不是本次新建的 —— 回滚时只删本次生成的东西。
+if server_ssh "test -f \"\$HOME/$server_key_relative\"" 2>/dev/null; then
+    SERVER_KEY_CREATED=0
+else
+    SERVER_KEY_CREATED=1
+fi
+
 server_ssh "umask 077; mkdir -p \"\$HOME/.ssh/device-onboard\"; key=\"\$HOME/$server_key_relative\"; if [ ! -f \"\$key\" ]; then ssh-keygen -q -t ed25519 -N '' -f \"\$key\" -C 'device-onboard:$device_id'; fi; cat \"\$key.pub\"" > "$CONFIG_DIR/server-key.pub"
 chmod 600 "$CONFIG_DIR/server-key.pub"
 server_pub=$(cat "$CONFIG_DIR/server-key.pub")
@@ -204,17 +372,6 @@ grep -qxF "$server_pub" "$HOME/.ssh/authorized_keys" 2>/dev/null || printf '%s\n
 chmod 600 "$HOME/.ssh/authorized_keys"
 
 reverse_port=
-tunnel_pid=
-cleanup_tunnel() {
-    if [ -n "${tunnel_pid:-}" ]; then
-        kill "$tunnel_pid" 2>/dev/null || true
-        wait "$tunnel_pid" 2>/dev/null || true
-    fi
-    if [ -n "${probe_log:-}" ]; then
-        rm -f "$probe_log" 2>/dev/null || true
-    fi
-}
-trap cleanup_tunnel EXIT INT TERM
 
 # Termux（Android）会在后台回收进程，建立隧道前先申请唤醒锁。
 if [ "$DEVICE_NEEDS_WAKE_LOCK" = 1 ]; then
@@ -371,6 +528,7 @@ if server_ssh "test -f \"$skill_file_remote\"" 2>/dev/null; then
 else
     # 新档案：头部在本地拼好（带 frontmatter，真换行），整体送过去落盘。
     # 不在远端用 printf 拼 —— 那需要多层反斜杠转义，极易写出乱码。
+    SKILL_WAS_NEW=1
     {
         printf -- '---\n'
         printf -- 'name: device-onboard\n'
@@ -396,6 +554,7 @@ DEVICE_HOST_ALIAS=$device_alias
 DEVICE_KEY=$device_key
 EOF
 chmod 600 "$STATE_FILE"
+INSTALL_OK=1
 cleanup_tunnel
 trap - EXIT INT TERM
 
