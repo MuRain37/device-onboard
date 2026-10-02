@@ -24,6 +24,7 @@ fi
 # 之后第一个参数是 harness 命令，剩余参数原样传给它。
 DIR=
 NO_MAP=0
+DIR_AUTO=0
 while [ "$#" -gt 0 ]; do
     case "$1" in
         -C)
@@ -57,11 +58,13 @@ if [ -z "$DIR" ] && [ "$NO_MAP" = 0 ]; then
     case "$PWD" in
         "$_dev_home")
             DIR="\$HOME/$DEVICE_ID"
+            DIR_AUTO=1
             ;;
         "$_dev_home"/*)
             # 只做精确前缀切片：用 "$_dev_home"/* 限定，避免 /home/ab 误伤 /home/abc；
             # 整体加引号，路径含空格也撑得住。
             DIR="\$HOME/$DEVICE_ID${PWD#"$_dev_home"}"
+            DIR_AUTO=1
             ;;
         *)
             DIR='$HOME'
@@ -78,6 +81,19 @@ case "$DIR" in
     '~')    DIR='$HOME' ;;
     '~/'*)  DIR="\$HOME/${DIR#\~/}" ;;
 esac
+
+# 依据 DIR 生成实际发给服务器的命令。挂载不可用而回退工作目录后要再生成一次，
+# 所以这里必须是一个函数 —— 只要 $DIR 变了就得重建。
+build_run_cmd() {
+    if [ -n "$DIR" ]; then
+        case "$HARNESS_CMD" in
+            codex*) RUN_CMD="$HARNESS_CMD -C \"$DIR\"" ;;
+            *)      RUN_CMD="cd \"$DIR\" && $HARNESS_CMD" ;;
+        esac
+    else
+        RUN_CMD="$HARNESS_CMD"
+    fi
+}
 
 HARNESS_CMD=codex
 if [ "$#" -gt 0 ]; then
@@ -97,10 +113,8 @@ esac
 # codex 用它自己的 -C 指定工作目录；别的命令就 cd 过去再跑。
 if [ -n "$DIR" ]; then
     # 用双引号：这样 $DIR 里若是 $HOME，交给远端 shell 去展开。
-    case "$HARNESS_CMD" in
-        codex*) RUN_CMD="$HARNESS_CMD -C \"$DIR\" $*" ;;
-        *)      RUN_CMD="cd \"$DIR\" && $HARNESS_CMD $*" ;;
-    esac
+    build_run_cmd
+    [ "$#" -gt 0 ] && RUN_CMD="$RUN_CMD $*"
 else
     RUN_CMD="$HARNESS_CMD $*"
 fi
@@ -180,6 +194,14 @@ if mountpoint -q "\$mp" 2>/dev/null; then
     fi
     fusermount -u "\$mp" >/dev/null 2>&1 || umount "\$mp" >/dev/null 2>&1 || true
     fusermount -uz "\$mp" >/dev/null 2>&1 || umount -l "\$mp" >/dev/null 2>&1 || true
+    # 僵死的 FUSE 挂载有时连上面两步都不吃，只能把对应的 sshfs 进程按 PID 收掉。
+    if mountpoint -q "\$mp" 2>/dev/null; then
+        for _p in \$(ps -eo pid,args 2>/dev/null | grep "[s]shfs.*\$mp" | awk '{print \$1}'); do
+            kill "\$_p" >/dev/null 2>&1 || true
+        done
+        sleep 1
+        fusermount -uz "\$mp" >/dev/null 2>&1 || true
+    fi
 fi
 sshfs $DEVICE_HOST_ALIAS: "\$mp" -o reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,idmap=user,follow_symlinks >/dev/null 2>&1
 if _ls "\$mp"; then echo MOUNT_OK; else echo MOUNT_FAIL; fi
@@ -189,7 +211,19 @@ REMOTE_MOUNT_EOF
     case "$mount_out" in
         *MOUNT_ALREADY*) printf '服务器 sshfs 挂载已就绪（~/%s）。\n' "$DEVICE_ID" ;;
         *MOUNT_OK*)      printf '已在服务器上挂好 sshfs（~/%s）。\n' "$DEVICE_ID" ;;
-        *)               printf '警告：服务器 sshfs 挂载未就绪（不影响 harness 启动）。\n' >&2 ;;
+        *)
+            # 挂载不可用时绝不能把工作目录留在坏挂载上：codex 一 chdir 就
+            # `Error: I/O error (os error 5)` 直接退出（实测，栈：僵死的 FUSE 挂载）。
+            # 自动映射来的目录就退回服务器家目录并说清楚；显式 -C 是用户点的，只警告。
+            if [ "$DIR_AUTO" = 1 ]; then
+                printf '警告：服务器 sshfs 挂载不可用，工作目录已退回服务器家目录（~）。\n' >&2
+                DIR='$HOME'
+                build_run_cmd
+                [ "$#" -gt 0 ] && RUN_CMD="$RUN_CMD $*"
+            else
+                printf '警告：服务器 sshfs 挂载未就绪（工作目录是你用 -C 定的，保持不动）。\n' >&2
+            fi
+            ;;
     esac
 fi
 

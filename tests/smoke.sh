@@ -588,4 +588,36 @@ if grep -q -- '-C ' "$TMP_HOME/hh3.log"; then
     exit 1
 fi
 
+# 挂载不可用 + 自动映射：工作目录必须退回服务器家目录，不能留在坏挂载上
+# （真机症状：codex 一 chdir 到僵死的 FUSE 挂载就 `Error: I/O error (os error 5)` 退出）
+cat > "$FAKE_BIN/ssh" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_SSH_LOG"
+case "$*" in
+    *反向隧道已建立*) printf '✅ 反向隧道已建立\n'; exec sleep 30 ;;
+    *sh\ -s*)        printf 'MOUNT_FAIL\n' ;;
+esac
+exit 0
+EOF
+chmod 755 "$FAKE_BIN/ssh"
+mkdir -p "$TMP_HOME/b9/proj/sub"
+: > "$TMP_HOME/hh4.log"
+env FAKE_SSH_LOG="$TMP_HOME/hh4.log" TERMUX_VERSION=0.118 \
+    PATH="$TMP_HOME/b9:$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
+    DEVICE_ONBOARD_CONFIG_FILE="$TMP_HOME/p9/config" \
+    sh -c "cd $TMP_HOME/b9/proj/sub && exec sh $TMP_HOME/b9/device-harness codex" \
+    > "$TMP_HOME/hh4.out" 2>&1 || true
+
+grep -q '工作目录已退回服务器家目录' "$TMP_HOME/hh4.out" || {
+    printf '挂载不可用时没有提示工作目录已回退：\n' >&2; sed 's/^/  /' "$TMP_HOME/hh4.out" >&2; exit 1
+}
+grep -q -- '-C "\$HOME"' "$TMP_HOME/hh4.log" || {
+    printf '挂载不可用时工作目录没有退回服务器家目录：\n' >&2; sed 's/^/  /' "$TMP_HOME/hh4.log" >&2; exit 1
+}
+if grep -q -- '-C "\$HOME/' "$TMP_HOME/hh4.log"; then
+    printf '挂载不可用却仍把工作目录指向挂载点（会 I/O error）：\n' >&2
+    sed 's/^/  /' "$TMP_HOME/hh4.log" >&2
+    exit 1
+fi
+
 printf 'smoke tests passed\n'
