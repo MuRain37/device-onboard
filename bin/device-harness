@@ -24,6 +24,14 @@ if [ "$#" -gt 0 ]; then
     shift
 fi
 
+# 交互式 Codex 把「执行工具命令」交给常驻的 app-server 守护进程，继承的是守护进程
+# 启动那一刻的环境 —— 所以 ssh 带过去的 DEVICE_ONBOARD_* 到不了它的工具手上
+# （实测：工具 shell 里的 SSH_CLIENT 与两天前的守护进程逐字一致）。
+# --no-daemon 让它在本次会话的进程里执行工具，环境变量就有效了。
+case "$HARNESS_CMD" in
+    codex) HARNESS_CMD='codex --no-daemon' ;;
+esac
+
 # device-tunnel 正常装在 PATH 里；找不到就退回脚本自己所在的目录。
 TUNNEL_BIN=$(command -v device-tunnel 2>/dev/null || true)
 [ -n "$TUNNEL_BIN" ] || TUNNEL_BIN=$(dirname "$0")/device-tunnel
