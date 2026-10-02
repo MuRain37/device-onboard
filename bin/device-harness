@@ -1,0 +1,245 @@
+#!/bin/sh
+# 一条命令做完两件事：起反向隧道 + 在服务器上跑 harness（默认 codex）。
+# 两者同生共死 —— harness 一退出（或按 Ctrl-C），隧道跟着收掉。
+#
+# 分成两个命令不行就在于「生命期」：隧道是后台长跑，harness 是前台交互，
+# 中间断了谁都发现不了。这里把它们绑一起，退出时一定收干净。
+set -eu
+
+CONFIG_FILE=${DEVICE_ONBOARD_CONFIG_FILE:-"$HOME/.config/device-onboard/config"}
+if [ ! -f "$CONFIG_FILE" ]; then
+    printf '错误：还没有设备接入配置，请先运行 install.sh。\n' >&2
+    exit 1
+fi
+# shellcheck source=/dev/null
+. "$CONFIG_FILE"
+: "${TUNNEL_HOST_ALIAS:?配置缺少 TUNNEL_HOST_ALIAS}"
+: "${SERVER_HOST_ALIAS:?配置缺少 SERVER_HOST_ALIAS}"
+: "${DEVICE_ID:?配置缺少 DEVICE_ID}"
+: "${DEVICE_HOST_ALIAS:?配置缺少 DEVICE_HOST_ALIAS}"
+
+# 选项：
+#   -C <目录>   指定服务器上的工作目录（可指向 sshfs 挂进来的手机目录）
+#   --no-map    不跟随本机目录，harness 就用服务器家目录（不想要的自动映射可以关掉）
+# 之后第一个参数是 harness 命令，剩余参数原样传给它。
+DIR=
+NO_MAP=0
+DIR_AUTO=0
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -C)
+            if [ "$#" -lt 2 ]; then
+                printf '错误：-C 后面要跟一个目录（服务器上的路径）。\n' >&2
+                exit 2
+            fi
+            DIR=$2
+            shift 2
+            ;;
+        --no-map)
+            NO_MAP=1
+            shift
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+# 没给 -C 时，按设备侧当前目录自动映射到服务器挂载点：
+#   设备 $HOME  ↔  服务器 ~/<设备ID>（sshfs 挂载点）
+# 这样 cd ~/项目 && device-harness 一条命令就够，不用手写 -C，也不用自己换算。
+# 显式 -C 优先级最高；--no-map 直接放弃自动映射（DIR 留空 = 用服务器家目录）。
+if [ -z "$DIR" ] && [ "$NO_MAP" = 0 ]; then
+    _dev_home=$HOME
+    # 去掉家目录末尾的斜杠，免得拼出 //。
+    case "$_dev_home" in
+        */) _dev_home=${_dev_home%/} ;;
+    esac
+    case "$PWD" in
+        "$_dev_home")
+            DIR="\$HOME/$DEVICE_ID"
+            DIR_AUTO=1
+            ;;
+        "$_dev_home"/*)
+            # 只做精确前缀切片：用 "$_dev_home"/* 限定，避免 /home/ab 误伤 /home/abc；
+            # 整体加引号，路径含空格也撑得住。
+            DIR="\$HOME/$DEVICE_ID${PWD#"$_dev_home"}"
+            DIR_AUTO=1
+            ;;
+        *)
+            DIR='$HOME'
+            printf '提示：当前目录 %s 不在设备家目录（%s）下，映射不到服务器挂载点，改用服务器家目录。\n' "$PWD" "$_dev_home" >&2
+            ;;
+    esac
+fi
+
+# 目录是「服务器上」的路径。~ 要留给服务器展开：
+# 如果写成 ~/phone，手机上那个 shell 会先把它展开成手机的路径（错），
+# 所以请用单引号：device-harness -C '~/phone'。这里再把 ~ 换成 $HOME，
+# 交给远端的 shell 去解析。
+case "$DIR" in
+    '~')    DIR='$HOME' ;;
+    '~/'*)  DIR="\$HOME/${DIR#\~/}" ;;
+esac
+
+# 依据 DIR 生成实际发给服务器的命令。挂载不可用而回退工作目录后要再生成一次，
+# 所以这里必须是一个函数 —— 只要 $DIR 变了就得重建。
+build_run_cmd() {
+    if [ -n "$DIR" ]; then
+        case "$HARNESS_CMD" in
+            codex*) RUN_CMD="$HARNESS_CMD -C \"$DIR\"" ;;
+            *)      RUN_CMD="cd \"$DIR\" && $HARNESS_CMD" ;;
+        esac
+    else
+        RUN_CMD="$HARNESS_CMD"
+    fi
+}
+
+HARNESS_CMD=codex
+if [ "$#" -gt 0 ]; then
+    HARNESS_CMD=$1
+    shift
+fi
+
+# 交互式 Codex 把「执行工具命令」交给常驻的 app-server 守护进程，继承的是守护进程
+# 启动那一刻的环境 —— 所以 ssh 带过去的 DEVICE_ONBOARD_* 到不了它的工具手上
+# （实测：工具 shell 里的 SSH_CLIENT 与两天前的守护进程逐字一致）。
+# --no-daemon 让它在本次会话的进程里执行工具，环境变量就有效了。
+# 用前缀匹配而不是精确匹配：写成 `codex --model X` 时也要带上。
+case "$HARNESS_CMD" in
+    codex*) HARNESS_CMD="$HARNESS_CMD --no-daemon" ;;
+esac
+
+# codex 用它自己的 -C 指定工作目录；别的命令就 cd 过去再跑。
+if [ -n "$DIR" ]; then
+    # 用双引号：这样 $DIR 里若是 $HOME，交给远端 shell 去展开。
+    build_run_cmd
+    [ "$#" -gt 0 ] && RUN_CMD="$RUN_CMD $*"
+else
+    RUN_CMD="$HARNESS_CMD $*"
+fi
+
+# device-tunnel 正常装在 PATH 里；找不到就退回脚本自己所在的目录。
+TUNNEL_BIN=$(command -v device-tunnel 2>/dev/null || true)
+[ -n "$TUNNEL_BIN" ] || TUNNEL_BIN=$(dirname "$0")/device-tunnel
+if [ ! -x "$TUNNEL_BIN" ]; then
+    printf '错误：找不到 device-tunnel，请先跑 install.sh 装好本地命令。\n' >&2
+    exit 1
+fi
+
+# 隧道这次跑在后台，前台留给 harness —— 所以更要拿住唤醒锁，
+# 否则 Android 会把整个 App 冻上，隧道看着还在、实际已经握手不能了。
+if [ -n "${TERMUX_VERSION:-}" ]; then
+    command -v termux-wake-lock >/dev/null 2>&1 && termux-wake-lock >/dev/null 2>&1 || true
+fi
+
+# 就绪信号不靠「端口在不在听」，而是等隧道自己打出的那行「✅ 反向隧道已建立」——
+# 那是服务器亲口说的（Host 块里 ExitOnForwardFailure yes：转发真绑上才会执行到那行）。
+# Termux 上 /tmp 不可写，临时文件必须用 $TMPDIR。
+READY_FILE=$(mktemp "${TMPDIR:-/tmp}/device-harness.XXXXXX" 2>/dev/null || mktemp)
+tunnel_pid=
+
+cleanup() {
+    if [ -n "$tunnel_pid" ] && kill -0 "$tunnel_pid" 2>/dev/null; then
+        kill "$tunnel_pid" 2>/dev/null || true
+        wait "$tunnel_pid" 2>/dev/null || true
+        printf '\n隧道已收起。\n'
+    fi
+    [ -f "$READY_FILE" ] && rm -f "$READY_FILE"
+}
+trap cleanup EXIT INT TERM
+
+printf '正在建立反向 SSH 隧道…\n'
+"$TUNNEL_BIN" >"$READY_FILE" 2>&1 </dev/null &
+tunnel_pid=$!
+
+waited=0
+while [ "$waited" -lt 60 ]; do
+    grep -q '反向隧道已建立' "$READY_FILE" 2>/dev/null && break
+    if ! kill -0 "$tunnel_pid" 2>/dev/null; then
+        printf '隧道进程退出了，没等到就绪。输出：\n' >&2
+        sed 's/^/    /' "$READY_FILE" >&2
+        exit 1
+    fi
+    sleep 1
+    waited=$((waited + 1))
+done
+
+if ! grep -q '反向隧道已建立' "$READY_FILE" 2>/dev/null; then
+    printf '等了 %s 秒没等到隧道就绪。最后几行输出：\n' "$waited" >&2
+    tail -5 "$READY_FILE" | sed 's/^/    /' >&2
+    exit 1
+fi
+
+printf '隧道就绪。在服务器上启动 %s（退出后隧道自动收起）…\n\n' "$HARNESS_CMD"
+
+# 隧道就绪后，确保服务器上 ~/<设备ID> 是活着的 sshfs 挂载：
+#   没挂           → 挂上
+#   挂了但访问卡住 → 先摘掉再重挂（探测一律带 timeout，别让一次卡死拖垮整条流程）
+# 挂载失败不影响 harness 启动；退出时也刻意不摘（留给下次直接用）。
+# 挂载发生在服务器上，源用设备档案里的 onboard-device-<id> 别名。
+# DEVICE_ONBOARD_NO_MOUNT=1 可跳过。
+if [ "${DEVICE_ONBOARD_NO_MOUNT:-0}" = "1" ]; then
+    printf '按 DEVICE_ONBOARD_NO_MOUNT=1 跳过服务器 sshfs 挂载。\n'
+else
+    mount_script=$(cat <<REMOTE_MOUNT_EOF
+set +e
+mp="\$HOME/$DEVICE_ID"
+mkdir -p "\$mp" 2>/dev/null && chmod 755 "\$mp" 2>/dev/null
+_ls() { if command -v timeout >/dev/null 2>&1; then timeout 3 ls "\$1" >/dev/null 2>&1; else ls "\$1" >/dev/null 2>&1; fi; }
+if mountpoint -q "\$mp" 2>/dev/null; then
+    if _ls "\$mp"; then
+        echo MOUNT_ALREADY
+        exit 0
+    fi
+    fusermount -u "\$mp" >/dev/null 2>&1 || umount "\$mp" >/dev/null 2>&1 || true
+    fusermount -uz "\$mp" >/dev/null 2>&1 || umount -l "\$mp" >/dev/null 2>&1 || true
+    # 僵死的 FUSE 挂载有时连上面两步都不吃，只能把对应的 sshfs 进程按 PID 收掉。
+    if mountpoint -q "\$mp" 2>/dev/null; then
+        for _p in \$(ps -eo pid,args 2>/dev/null | grep "[s]shfs.*\$mp" | awk '{print \$1}'); do
+            kill "\$_p" >/dev/null 2>&1 || true
+        done
+        sleep 1
+        fusermount -uz "\$mp" >/dev/null 2>&1 || true
+    fi
+fi
+# 绝不能拿「ls 空目录」当挂载成功的证据 —— 空目录 ls 也会成功，会假报 MOUNT_OK，
+# 接着 codex 在空挂载点上 chdir，得到「Error: No such file or directory (os error 2)」
+# （真机踩过）。必须用 mountpoint 验证，并且别再吞掉 sshfs 的报错，失败要看得到原因。
+# 注意：这里是未引用的 heredoc，命令替换要写成 \$( ) 转义形式，否则会在设备本地就执行 sshfs。
+mount_err=\$(sshfs $DEVICE_HOST_ALIAS: "\$mp" -o reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,idmap=user,follow_symlinks 2>&1) || true
+if mountpoint -q "\$mp" 2>/dev/null && _ls "\$mp"; then
+    echo MOUNT_OK
+else
+    echo MOUNT_FAIL
+    printf '%s\n' "\$mount_err" | head -3
+fi
+REMOTE_MOUNT_EOF
+)
+    mount_out=$(printf '%s\n' "$mount_script" | ssh "$SERVER_HOST_ALIAS" 'sh -s' 2>&1 || true)
+    case "$mount_out" in
+        *MOUNT_ALREADY*) printf '服务器 sshfs 挂载已就绪（~/%s）。\n' "$DEVICE_ID" ;;
+        *MOUNT_OK*)      printf '已在服务器上挂好 sshfs（~/%s）。\n' "$DEVICE_ID" ;;
+        *)
+            # 把 sshfs 的真实报错带出来，不然只剩一句「未就绪」，查不出原因。
+            _mnt_err=$(printf '%s' "$mount_out" | grep -v '^MOUNT_FAIL$' | grep -v '^$' | head -2 | tr '\n' ' ')
+            [ -n "$_mnt_err" ] && printf '警告：服务器 sshfs 挂载失败：%s\n' "$_mnt_err" >&2
+            # 挂载不可用时绝不能把工作目录留在坏挂载上：codex 一 chdir 就
+            # `Error: I/O error (os error 5)` 直接退出（实测，栈：僵死的 FUSE 挂载）。
+            # 自动映射来的目录就退回服务器家目录并说清楚；显式 -C 是用户点的，只警告。
+            if [ "$DIR_AUTO" = 1 ]; then
+                printf '警告：服务器 sshfs 挂载不可用，工作目录已退回服务器家目录（~）。\n' >&2
+                DIR='$HOME'
+                build_run_cmd
+                [ "$#" -gt 0 ] && RUN_CMD="$RUN_CMD $*"
+            else
+                printf '警告：服务器 sshfs 挂载未就绪（工作目录是你用 -C 定的，保持不动）。\n' >&2
+            fi
+            ;;
+    esac
+fi
+
+# 把「本次会话来自哪台设备」交给 harness。变量名和用法写在服务器上那份设备档案里，
+# 而档案的 description 在会话一开始就可见 —— 所以 harness 知道该来查这两个变量。
+ssh -t "$SERVER_HOST_ALIAS" \
+    "DEVICE_ONBOARD_ID='$DEVICE_ID' DEVICE_ONBOARD_DEVICE_ALIAS='$DEVICE_HOST_ALIAS' $RUN_CMD"
