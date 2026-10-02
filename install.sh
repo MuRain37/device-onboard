@@ -20,6 +20,7 @@ usage() {
   DEVICE_ONBOARD_DEVICE_SSH_PORT    本机 sshd 端口（macOS 默认 22，Termux 默认 8022）
   DEVICE_ONBOARD_REVERSE_PORT_START 反向端口起点（默认 2230，避开手工占用的低位端口）
   DEVICE_ONBOARD_REVERSE_PORT_END   反向端口终点（默认 2299）
+  DEVICE_ONBOARD_SSHFS              设为 0 跳过服务器端 sshfs 配置（默认开启）
 EOF
 }
 
@@ -503,6 +504,77 @@ EOF
 
 printf '%s\n' "$remote_block" | server_ssh "set -eu; file=\"\$HOME/.ssh/config\"; tmp=\"\$(mktemp)\"; mkdir -p \"\$HOME/.ssh\"; if [ -f \"\$file\" ]; then awk -v begin='$remote_begin' -v end='$remote_end' '\$0 == begin {skip=1; next} \$0 == end {skip=0; next} !skip {print}' \"\$file\" > \"\$tmp\"; cp \"\$file\" \"\$file.device-onboard.bak\"; else : > \"\$tmp\"; fi; cat >> \"\$tmp\"; mv \"\$tmp\" \"\$file\"; chmod 600 \"\$file\""
 
+# ---------- 服务器端 sshfs（可选；任何一步失败都不影响接入） ----------
+# 把设备家目录通过 sshfs 挂到服务器的 ~/<device_id>，服务器上的 harness 就能直接
+# 读写设备里的文件。试挂必须趁反向探测隧道还开着 —— 接入结束后隧道就关了，
+# 之后服务器再想连设备就没通道了。所以这里挂一次、验证读写、立刻摘掉，只留结论。
+# DEVICE_ONBOARD_SSHFS=0 可整体跳过。回滚逻辑不动：本段所有失败都被吞掉。
+SSHFS_STATUS=unavailable
+
+setup_server_sshfs() {
+    if [ "${DEVICE_ONBOARD_SSHFS:-1}" = "0" ]; then
+        SSHFS_STATUS=skipped
+        printf '按 DEVICE_ONBOARD_SSHFS=0 跳过服务器 sshfs 配置。\n'
+        return 0
+    fi
+    _sshfs_script=$(cat <<REMOTE_SSHFS_EOF
+set +e
+mp="\$HOME/$device_id"
+mkdir -p "\$mp" 2>/dev/null && chmod 755 "\$mp" 2>/dev/null || { echo SSHFS_NO_DIR; exit 0; }
+if ! command -v sshfs >/dev/null 2>&1; then
+    case "\$(uname -s 2>/dev/null)" in
+        Darwin) echo SSHFS_MACOS; exit 0 ;;
+    esac
+    if command -v apt-get >/dev/null 2>&1; then
+        sudo -n apt-get install -y sshfs >/dev/null 2>&1
+    fi
+    command -v sshfs >/dev/null 2>&1 || { echo SSHFS_NO_INSTALL; exit 0; }
+fi
+_ls() { if command -v timeout >/dev/null 2>&1; then timeout 3 ls "\$1" >/dev/null 2>&1; else ls "\$1" >/dev/null 2>&1; fi; }
+if sshfs onboard-device-$device_id: "\$mp" -o reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,idmap=user,follow_symlinks >/dev/null 2>&1; then
+    if _ls "\$mp" && t="\$mp/.device-onboard-write-test.\$\$" && printf ok > "\$t" 2>/dev/null && rm -f "\$t" 2>/dev/null; then
+        echo SSHFS_OK
+    else
+        rm -f "\$mp/.device-onboard-write-test.\$\$" 2>/dev/null
+        echo SSHFS_RW_FAIL
+    fi
+    fusermount -u "\$mp" >/dev/null 2>&1 || umount "\$mp" >/dev/null 2>&1 || true
+else
+    echo SSHFS_MOUNT_FAIL
+fi
+REMOTE_SSHFS_EOF
+)
+    _sshfs_out=$(printf '%s\n' "$_sshfs_script" | server_ssh 'sh -s' 2>&1 || true)
+    case "$_sshfs_out" in
+        *SSHFS_OK*)
+            SSHFS_STATUS=verified
+            printf '✅ 服务器 sshfs 试挂成功（读、写已验证），已卸载。\n'
+            ;;
+        *SSHFS_MACOS*)
+            SSHFS_STATUS=unsupported
+            printf '提示：服务器是 macOS，跳过 sshfs 配置（如需请自行安装 macFUSE + sshfs）。\n' >&2
+            ;;
+        *SSHFS_NO_INSTALL*)
+            SSHFS_STATUS=unavailable
+            printf '警告：服务器上装不了 sshfs，跳过 sshfs 配置（不影响接入）。\n' >&2
+            ;;
+        *SSHFS_NO_DIR*)
+            SSHFS_STATUS=unavailable
+            printf '警告：服务器上创建挂载点 ~/%s 失败，跳过 sshfs 配置（不影响接入）。\n' "$device_id" >&2
+            ;;
+        *SSHFS_RW_FAIL*)
+            SSHFS_STATUS=unavailable
+            printf '警告：服务器 sshfs 挂上了但读写验证失败，已卸载（不影响接入）。\n' >&2
+            ;;
+        *)
+            SSHFS_STATUS=unavailable
+            printf '警告：服务器 sshfs 试挂失败，跳过（不影响接入）。\n' >&2
+            ;;
+    esac
+    return 0
+}
+setup_server_sshfs || true
+
 skill_begin="<!-- DEVICE-ONBOARD:$device_id BEGIN -->"
 skill_end="<!-- DEVICE-ONBOARD:$device_id END -->"
 skill_block=$(cat <<EOF
@@ -515,6 +587,8 @@ device_ssh_port: $device_port
 reverse_port: $reverse_port
 device_key_name: $device_id-device
 server_key_name: $device_id-server
+sshfs_mount: ~/$device_id
+sshfs_status: $SSHFS_STATUS
 $skill_end
 EOF
 )
@@ -575,6 +649,7 @@ SERVER_HOST_ALIAS=$server_alias
 TUNNEL_HOST_ALIAS=$tunnel_alias
 DEVICE_HOST_ALIAS=$device_alias
 DEVICE_KEY=$device_key
+SSHFS_STATUS=$SSHFS_STATUS
 EOF
 chmod 600 "$STATE_FILE"
 INSTALL_OK=1
@@ -585,4 +660,5 @@ printf '\n✅ 设备接入完成。\n'
 printf '普通服务器：ssh %s\n' "$server_alias"
 printf '一键（隧道 + harness）：device-harness\n'
 printf '反向隧道：device-tunnel\n'
+printf '服务器挂载点：~/<设备ID>（sshfs：%s）\n' "$SSHFS_STATUS"
 printf '在服务器上跑 Harness：ssh %s codex\n' "$server_alias"

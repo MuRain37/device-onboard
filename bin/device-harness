@@ -27,6 +27,32 @@ if [ "${1:-}" = "-C" ] && [ "$#" -ge 2 ]; then
     shift 2
 fi
 
+# 没给 -C 时，按设备侧当前目录自动映射到服务器挂载点：
+#   设备 $HOME  ↔  服务器 ~/<设备ID>（sshfs 挂载点）
+# 这样 cd ~/项目 && device-harness 一条命令就够，不用手写 -C，也不用自己换算。
+# 显式 -C 优先级最高：只有 DIR 仍为空时才自动推导。
+if [ -z "$DIR" ]; then
+    _dev_home=$HOME
+    # 去掉家目录末尾的斜杠，免得拼出 //。
+    case "$_dev_home" in
+        */) _dev_home=${_dev_home%/} ;;
+    esac
+    case "$PWD" in
+        "$_dev_home")
+            DIR="\$HOME/$DEVICE_ID"
+            ;;
+        "$_dev_home"/*)
+            # 只做精确前缀切片：用 "$_dev_home"/* 限定，避免 /home/ab 误伤 /home/abc；
+            # 整体加引号，路径含空格也撑得住。
+            DIR="\$HOME/$DEVICE_ID${PWD#"$_dev_home"}"
+            ;;
+        *)
+            DIR='$HOME'
+            printf '提示：当前目录 %s 不在设备家目录（%s）下，映射不到服务器挂载点，改用服务器家目录。\n' "$PWD" "$_dev_home" >&2
+            ;;
+    esac
+fi
+
 # 目录是「服务器上」的路径。~ 要留给服务器展开：
 # 如果写成 ~/phone，手机上那个 shell 会先把它展开成手机的路径（错），
 # 所以请用单引号：device-harness -C '~/phone'。这里再把 ~ 换成 $HOME，
@@ -115,6 +141,40 @@ if ! grep -q '反向隧道已建立' "$READY_FILE" 2>/dev/null; then
 fi
 
 printf '隧道就绪。在服务器上启动 %s（退出后隧道自动收起）…\n\n' "$HARNESS_CMD"
+
+# 隧道就绪后，确保服务器上 ~/<设备ID> 是活着的 sshfs 挂载：
+#   没挂           → 挂上
+#   挂了但访问卡住 → 先摘掉再重挂（探测一律带 timeout，别让一次卡死拖垮整条流程）
+# 挂载失败不影响 harness 启动；退出时也刻意不摘（留给下次直接用）。
+# 挂载发生在服务器上，源用设备档案里的 onboard-device-<id> 别名。
+# DEVICE_ONBOARD_NO_MOUNT=1 可跳过。
+if [ "${DEVICE_ONBOARD_NO_MOUNT:-0}" = "1" ]; then
+    printf '按 DEVICE_ONBOARD_NO_MOUNT=1 跳过服务器 sshfs 挂载。\n'
+else
+    mount_script=$(cat <<REMOTE_MOUNT_EOF
+set +e
+mp="\$HOME/$DEVICE_ID"
+mkdir -p "\$mp" 2>/dev/null && chmod 755 "\$mp" 2>/dev/null
+_ls() { if command -v timeout >/dev/null 2>&1; then timeout 3 ls "\$1" >/dev/null 2>&1; else ls "\$1" >/dev/null 2>&1; fi; }
+if mountpoint -q "\$mp" 2>/dev/null; then
+    if _ls "\$mp"; then
+        echo MOUNT_ALREADY
+        exit 0
+    fi
+    fusermount -u "\$mp" >/dev/null 2>&1 || umount "\$mp" >/dev/null 2>&1 || true
+    fusermount -uz "\$mp" >/dev/null 2>&1 || umount -l "\$mp" >/dev/null 2>&1 || true
+fi
+sshfs $DEVICE_HOST_ALIAS: "\$mp" -o reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,idmap=user,follow_symlinks >/dev/null 2>&1
+if _ls "\$mp"; then echo MOUNT_OK; else echo MOUNT_FAIL; fi
+REMOTE_MOUNT_EOF
+)
+    mount_out=$(printf '%s\n' "$mount_script" | ssh "$SERVER_HOST_ALIAS" 'sh -s' 2>&1 || true)
+    case "$mount_out" in
+        *MOUNT_ALREADY*) printf '服务器 sshfs 挂载已就绪（~/%s）。\n' "$DEVICE_ID" ;;
+        *MOUNT_OK*)      printf '已在服务器上挂好 sshfs（~/%s）。\n' "$DEVICE_ID" ;;
+        *)               printf '警告：服务器 sshfs 挂载未就绪（不影响 harness 启动）。\n' >&2 ;;
+    esac
+fi
 
 # 把「本次会话来自哪台设备」交给 harness。变量名和用法写在服务器上那份设备档案里，
 # 而档案的 description 在会话一开始就可见 —— 所以 harness 知道该来查这两个变量。
