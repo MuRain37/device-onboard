@@ -14,30 +14,6 @@ exit 0
 EOF
 chmod 755 "$FAKE_BIN/ssh"
 
-# 服务器端的 sshfs / mountpoint / fusermount：沙箱里不能真挂载，用假命令记录调用。
-# 只在对应 FAKE_*_LOG 有值时才写日志；行为用 FAKE_MOUNT_STATE 控制（默认未挂载）。
-cat > "$FAKE_BIN/sshfs" <<'EOF'
-#!/bin/sh
-if [ -n "${FAKE_SSHFS_LOG:-}" ]; then printf '%s\n' "$*" >> "$FAKE_SSHFS_LOG"; fi
-# 假挂载成功：打个标记，让同一次运行里的 mountpoint 也能看见（真实挂载就是这么表现的）
-[ -n "${FAKE_MOUNT_MARKER:-}" ] && : > "$FAKE_MOUNT_MARKER"
-exit 0
-EOF
-cat > "$FAKE_BIN/mountpoint" <<'EOF'
-#!/bin/sh
-if [ -n "${FAKE_MOUNTPOINT_LOG:-}" ]; then printf '%s\n' "$*" >> "$FAKE_MOUNTPOINT_LOG"; fi
-[ -n "${FAKE_MOUNT_MARKER:-}" ] && [ -e "$FAKE_MOUNT_MARKER" ] && exit 0
-case "${FAKE_MOUNT_STATE:-unmounted}" in
-    mounted) exit 0 ;;
-    *)       exit 1 ;;
-esac
-EOF
-cat > "$FAKE_BIN/fusermount" <<'EOF'
-#!/bin/sh
-if [ -n "${FAKE_FUSERMOUNT_LOG:-}" ]; then printf '%s\n' "$*" >> "$FAKE_FUSERMOUNT_LOG"; fi
-exit 0
-EOF
-chmod 755 "$FAKE_BIN/sshfs" "$FAKE_BIN/mountpoint" "$FAKE_BIN/fusermount"
 
 HOME="$TMP_HOME" DEVICE_ONBOARD_BIN_DIR="$TMP_HOME/bin" DEVICE_ONBOARD_CONFIG_DIR="$TMP_HOME/config" DEVICE_ONBOARD_KEY_DIR="$TMP_HOME/keys" \
     sh "$ROOT/install.sh" --help >/dev/null
@@ -218,7 +194,7 @@ rm -f "$TMP_HOME/.ssh/config" "$TMP_HOME/.ssh/config.before"
 cat > "$FAKE_BIN/ssh" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >> "$FAKE_SSH_LOG"
-# 'sh -s' 的远端脚本直接本地执行：这样 PATH 里的假 sshfs/mountpoint/fusermount 才被真正调用。
+# 'sh -s' 的远端脚本直接本地执行：这样 install.sh 送到服务器上的脚本能在沙箱里真的落盘。
 case "$*" in
     *'sh -s'*) exec sh ;;
 esac
@@ -237,8 +213,7 @@ chmod 755 "$FAKE_BIN/ssh"
 
 mkdir -p "$TMP_HOME/p9"
 : > "$TMP_HOME/full.log"
-: > "$TMP_HOME/full-sshfs.log"
-printf '1\nxiaomitest\n134.175.91.169\nubuntu\n22\n' | env FAKE_SSH_LOG="$TMP_HOME/full.log" FAKE_SSHFS_LOG="$TMP_HOME/full-sshfs.log" TERMUX_VERSION=0.118 PATH="$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
+printf '1\nxiaomitest\n134.175.91.169\nubuntu\n22\n' | env FAKE_SSH_LOG="$TMP_HOME/full.log" TERMUX_VERSION=0.118 PATH="$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
     DEVICE_ONBOARD_REVERSE_PORT_START=2230 DEVICE_ONBOARD_REVERSE_PORT_END=2230 \
     DEVICE_ONBOARD_CONFIG_DIR="$TMP_HOME/p9" DEVICE_ONBOARD_KEY_DIR="$TMP_HOME/k9" DEVICE_ONBOARD_BIN_DIR="$TMP_HOME/b9" \
     sh "$ROOT/install.sh" >/tmp/device-onboard-smoke.out 2>&1 || true
@@ -248,21 +223,8 @@ grep -q 'DEVICE-ONBOARD-E2E-OK' "$TMP_HOME/full.log"
 [ -f "$TMP_HOME/p9/config" ] || { printf '状态文件没写出来\n' >&2; exit 1; }
 grep -q 'Host onboard-tunnel-xiaomitest' "$TMP_HOME/.ssh/config" || { printf '反向隧道 Host 没写进配置\n' >&2; exit 1; }
 
-# 接入时也要把服务器 sshfs 配好：用设备别名试挂一次、验证读写后记下结论
-grep -q 'onboard-device-xiaomitest:' "$TMP_HOME/full-sshfs.log" || {
-    printf '首次接入没有用设备别名挂 sshfs：\n' >&2
-    sed 's/^/  /' "$TMP_HOME/full-sshfs.log" >&2
-    exit 1
-}
-grep -q 'reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,idmap=user,follow_symlinks' "$TMP_HOME/full-sshfs.log" || {
-    printf 'sshfs 挂载参数不对：\n' >&2
-    sed 's/^/  /' "$TMP_HOME/full-sshfs.log" >&2
-    exit 1
-}
-grep -q '^SSHFS_STATUS=verified' "$TMP_HOME/p9/config" || {
-    printf '接入没把 sshfs 试挂结论写进状态文件\n' >&2
-    exit 1
-}
+# 接入时要在服务器上把项目锚点目录 ~/<设备名> 建好（普通目录，作为设备身份锚点）
+[ -d "$TMP_HOME/xiaomitest" ] || { printf '首次接入没有创建项目锚点目录 ~/<设备ID>\n' >&2; exit 1; }
 
 # 生成的配置必须能被真 ssh 解析 —— 昨晚就是这条把整台设备弄瘸的
 if ! ssh -F "$TMP_HOME/.ssh/config" -G onboard-tunnel-xiaomitest >/dev/null 2>&1; then
@@ -278,7 +240,7 @@ fi
 AGENTS_MD="$TMP_HOME/.codex/AGENTS.md"
 
 run_full_install_again() {
-    printf '1\nxiaomitest\n134.175.91.169\nubuntu\n22\n' | env FAKE_SSH_LOG="$TMP_HOME/full.log" FAKE_SSHFS_LOG="$TMP_HOME/full-sshfs.log" TERMUX_VERSION=0.118 PATH="$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
+    printf '1\nxiaomitest\n134.175.91.169\nubuntu\n22\n' | env FAKE_SSH_LOG="$TMP_HOME/full.log" TERMUX_VERSION=0.118 PATH="$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
         DEVICE_ONBOARD_REVERSE_PORT_START=2230 DEVICE_ONBOARD_REVERSE_PORT_END=2230 \
         DEVICE_ONBOARD_CONFIG_DIR="$TMP_HOME/p9" DEVICE_ONBOARD_KEY_DIR="$TMP_HOME/k9" DEVICE_ONBOARD_BIN_DIR="$TMP_HOME/b9" \
         sh "$ROOT/install.sh" >/tmp/device-onboard-smoke.out 2>&1 || true
@@ -316,7 +278,7 @@ grep -q '这行不在块里，必须原样保留。' "$AGENTS_MD" || { printf '�
 
 # DEVICE_ONBOARD_AGENTS_MD=0 → 跳过，不创建（接入照常完成）
 rm -f "$AGENTS_MD" "$TMP_HOME/p9/config"
-printf '1\nxiaomitest\n134.175.91.169\nubuntu\n22\n' | env DEVICE_ONBOARD_AGENTS_MD=0 FAKE_SSH_LOG="$TMP_HOME/full.log" FAKE_SSHFS_LOG="$TMP_HOME/full-sshfs.log" TERMUX_VERSION=0.118 PATH="$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
+printf '1\nxiaomitest\n134.175.91.169\nubuntu\n22\n' | env DEVICE_ONBOARD_AGENTS_MD=0 FAKE_SSH_LOG="$TMP_HOME/full.log" TERMUX_VERSION=0.118 PATH="$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
     DEVICE_ONBOARD_REVERSE_PORT_START=2230 DEVICE_ONBOARD_REVERSE_PORT_END=2230 \
     DEVICE_ONBOARD_CONFIG_DIR="$TMP_HOME/p9" DEVICE_ONBOARD_KEY_DIR="$TMP_HOME/k9" DEVICE_ONBOARD_BIN_DIR="$TMP_HOME/b9" \
     sh "$ROOT/install.sh" >/tmp/device-onboard-smoke.out 2>&1 || true
@@ -355,71 +317,7 @@ grep -q "DEVICE_ONBOARD_DEVICE_ALIAS='onboard-device-xiaomitest'" "$TMP_HOME/hh.
 }
 grep -q '已收起' "$TMP_HOME/hh.out" || { printf '退出时没收隧道：\n'; sed 's/^/  /' "$TMP_HOME/hh.out" >&2; exit 1; }
 
-# --- device-harness 在隧道就绪后维持服务器上的 sshfs 挂载 ---
-# 沙箱里不能真挂载：服务器端命令 sshfs/mountpoint/fusermount 用文件开头的假命令，
-# 假 ssh 对 'sh -s' 直接本地执行，于是 PATH 里的假命令真的被调用。
-
-harness_mount_case() {
-    _name=$1
-    _state=$2
-    : > "$TMP_HOME/mount-$_name-sshfs.log"
-    : > "$TMP_HOME/mount-$_name-mountpoint.log"
-    rm -f "$TMP_HOME/mount-$_name.fusemarker"
-    : > "$TMP_HOME/mount-$_name-fusermount.log"
-    : > "$TMP_HOME/mount-$_name-ssh.log"
-    env FAKE_MOUNT_STATE="$_state" \
-        FAKE_SSHFS_LOG="$TMP_HOME/mount-$_name-sshfs.log" \
-        FAKE_MOUNTPOINT_LOG="$TMP_HOME/mount-$_name-mountpoint.log" \
-        FAKE_MOUNT_MARKER="$TMP_HOME/mount-$_name.fusemarker" \
-        FAKE_FUSERMOUNT_LOG="$TMP_HOME/mount-$_name-fusermount.log" \
-        FAKE_SSH_LOG="$TMP_HOME/mount-$_name-ssh.log" \
-        TERMUX_VERSION=0.118 PATH="$TMP_HOME/b9:$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
-        DEVICE_ONBOARD_CONFIG_FILE="$TMP_HOME/p9/config" \
-        sh "$TMP_HOME/b9/device-harness" codex > "$TMP_HOME/mount-$_name.out" 2>&1 || true
-}
-
-# 场景一：服务器上没挂 → 应挂上，且参数用对
-harness_mount_case unmounted unmounted
-if [ ! -s "$TMP_HOME/mount-unmounted-sshfs.log" ]; then
-    printf '未挂载时没有挂 sshfs：\n' >&2
-    sed 's/^/  /' "$TMP_HOME/mount-unmounted.out" >&2
-    exit 1
-fi
-grep -q 'onboard-device-xiaomitest:' "$TMP_HOME/mount-unmounted-sshfs.log" || {
-    printf '未挂载时没有用设备别名挂 sshfs：\n' >&2
-    sed 's/^/  /' "$TMP_HOME/mount-unmounted-sshfs.log" >&2
-    exit 1
-}
-grep -q 'reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,idmap=user,follow_symlinks' "$TMP_HOME/mount-unmounted-sshfs.log" || {
-    printf 'device-harness 的 sshfs 挂载参数不对：\n' >&2
-    sed 's/^/  /' "$TMP_HOME/mount-unmounted-sshfs.log" >&2
-    exit 1
-}
-grep -q '已在服务器上挂好' "$TMP_HOME/mount-unmounted.out" || {
-    printf '未挂载时没给出挂载成功信息：\n' >&2
-    sed 's/^/  /' "$TMP_HOME/mount-unmounted.out" >&2
-    exit 1
-}
-if [ -s "$TMP_HOME/mount-unmounted-fusermount.log" ]; then
-    printf '未挂载时不该调用 fusermount：\n' >&2
-    sed 's/^/  /' "$TMP_HOME/mount-unmounted-fusermount.log" >&2
-    exit 1
-fi
-
-# 场景二：服务器上已经挂着且活着 → 不应重复挂
-harness_mount_case mounted mounted
-if [ -s "$TMP_HOME/mount-mounted-sshfs.log" ]; then
-    printf '已挂载时重复挂了 sshfs：\n' >&2
-    sed 's/^/  /' "$TMP_HOME/mount-mounted-sshfs.log" >&2
-    exit 1
-fi
-grep -q '挂载已就绪' "$TMP_HOME/mount-mounted.out" || {
-    printf '已挂载时没识别出已就绪：\n' >&2
-    sed 's/^/  /' "$TMP_HOME/mount-mounted.out" >&2
-    exit 1
-}
-
-# --- 不带 -C：按设备侧 $PWD 自动映射到服务器挂载点（设备 $HOME ↔ 服务器 ~/<设备ID>）---
+# --- 不带 -C：按设备侧 $PWD 自动映射到服务器锚点目录（设备 $HOME ↔ 服务器 ~/<设备ID>）---
 # 从 log 里看 codex 实际拿到的 -C。
 
 auto_case() {
@@ -427,9 +325,7 @@ auto_case() {
     _acwd=$2
     shift 2
     : > "$TMP_HOME/auto-$_an.log"
-    rm -f "$TMP_HOME/auto-$_an.fusemarker"
     ( cd "$_acwd" && env FAKE_SSH_LOG="$TMP_HOME/auto-$_an.log" TERMUX_VERSION=0.118 \
-        FAKE_MOUNT_MARKER="$TMP_HOME/auto-$_an.fusemarker" \
         PATH="$TMP_HOME/b9:$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
         DEVICE_ONBOARD_CONFIG_FILE="$TMP_HOME/p9/config" \
         sh "$TMP_HOME/b9/device-harness" "$@" ) > "$TMP_HOME/auto-$_an.out" 2>&1 || true
@@ -439,15 +335,15 @@ auto_case() {
 mkdir -p "$TMP_HOME/proj-a/sub"
 auto_case under "$TMP_HOME/proj-a/sub" codex
 grep -qF -- '-C "$HOME/xiaomitest/proj-a/sub"' "$TMP_HOME/auto-under.log" || {
-    printf '未按 $PWD 自动映射到服务器挂载点：\n' >&2
+    printf '未按 $PWD 自动映射到服务器锚点目录：\n' >&2
     sed 's/^/  /' "$TMP_HOME/auto-under.log" >&2
     exit 1
 }
 
-# ①b PWD == HOME → 对应挂载点根
+# ①b PWD == HOME → 对应锚点目录根
 auto_case at-home "$TMP_HOME" codex
 grep -qF -- '-C "$HOME/xiaomitest"' "$TMP_HOME/auto-at-home.log" || {
-    printf '$PWD 等于家目录时没映射到挂载点根：\n' >&2
+    printf '$PWD 等于家目录时没映射到锚点目录根：\n' >&2
     sed 's/^/  /' "$TMP_HOME/auto-at-home.log" >&2
     exit 1
 }
@@ -461,13 +357,13 @@ grep -qF -- '-C "$HOME/xiaomitest/proj space/sub"' "$TMP_HOME/auto-space.log" ||
     exit 1
 }
 
-# ② PWD 不在 $HOME 下 → 退回设备挂载点 ~/<设备ID>，并说明原因
+# ② PWD 不在 $HOME 下 → 退回设备锚点目录 ~/<设备ID>，并说明原因
 # （身份靠位置：落在共享的 $HOME 会丢掉「本次会话来自哪台设备」）
 OUTSIDE=$(mktemp -d)
 auto_case outside "$OUTSIDE" codex
 rm -rf "$OUTSIDE"
 grep -qF -- '-C "$HOME/xiaomitest"' "$TMP_HOME/auto-outside.log" || {
-    printf '不在家目录下时没退回设备挂载点：\n' >&2
+    printf '不在家目录下时没退回设备锚点目录：\n' >&2
     sed 's/^/  /' "$TMP_HOME/auto-outside.log" >&2
     exit 1
 }
@@ -593,45 +489,7 @@ grep -q -- '-C "$HOME/phone"' "$TMP_HOME/hh2.log" || {
     exit 1
 }
 
-# --- DEVICE_ONBOARD_SSHFS=0：整体跳过 sshfs 配置，接入照常完成 ---
-cat > "$FAKE_BIN/ssh" <<'EOF'
-#!/bin/sh
-printf '%s\n' "$*" >> "$FAKE_SSH_LOG"
-case "$*" in
-    *DEVICE-ONBOARD-E2E-OK*) printf 'DEVICE-ONBOARD-E2E-OK' ;;
-esac
-case "$*" in
-    *反向隧道已建立*) printf '✅ 反向隧道已建立\n'; exec sleep 30 ;;
-esac
-case "$*" in
-    *-R*localhost*) exec sleep 30 ;;
-esac
-exit 0
-EOF
-chmod 755 "$FAKE_BIN/ssh"
-
-: > "$TMP_HOME/skip-sshfs.log"
-printf '1\nskipfs\n203.0.113.10\nubuntu\n22\n' | env DEVICE_ONBOARD_SSHFS=0 FAKE_SSH_LOG="$TMP_HOME/skip.log" FAKE_SSHFS_LOG="$TMP_HOME/skip-sshfs.log" TERMUX_VERSION=0.118 PATH="$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
-    DEVICE_ONBOARD_REVERSE_PORT_START=2230 DEVICE_ONBOARD_REVERSE_PORT_END=2230 \
-    DEVICE_ONBOARD_CONFIG_DIR="$TMP_HOME/p11" DEVICE_ONBOARD_KEY_DIR="$TMP_HOME/k11" DEVICE_ONBOARD_BIN_DIR="$TMP_HOME/b11" \
-    sh "$ROOT/install.sh" >/tmp/device-onboard-smoke.out 2>&1 || true
-
-grep -q '设备接入完成' /tmp/device-onboard-smoke.out || {
-    printf 'DEVICE_ONBOARD_SSHFS=0 时接入没有正常完成：\n' >&2
-    sed 's/^/  /' /tmp/device-onboard-smoke.out >&2
-    exit 1
-}
-grep -q '^SSHFS_STATUS=skipped' "$TMP_HOME/p11/config" || {
-    printf 'DEVICE_ONBOARD_SSHFS=0 没被记录为 skipped\n' >&2
-    exit 1
-}
-if [ -s "$TMP_HOME/skip-sshfs.log" ]; then
-    printf 'DEVICE_ONBOARD_SSHFS=0 却仍然调用了 sshfs：\n' >&2
-    sed 's/^/  /' "$TMP_HOME/skip-sshfs.log" >&2
-    exit 1
-fi
-
-# --no-map：不跟随本机目录，但仍落在设备挂载点（身份靠位置）
+# --no-map：不跟随本机目录，但仍落在设备锚点目录（身份靠位置）
 cat > "$FAKE_BIN/ssh" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >> "$FAKE_SSH_LOG"
@@ -651,56 +509,13 @@ grep -q 'codex --no-daemon' "$TMP_HOME/hh3.log" || {
     printf '--no-map 时没正常启动 codex\n' >&2; sed 's/^/  /' "$TMP_HOME/hh3.log" >&2; exit 1
 }
 grep -qF -- '-C "$HOME/xiaomitest"' "$TMP_HOME/hh3.log" || {
-    printf '--no-map 没把工作目录落在设备挂载点：\n' >&2
+    printf '--no-map 没把工作目录落在设备锚点目录：\n' >&2
     sed 's/^/  /' "$TMP_HOME/hh3.log" >&2
     exit 1
 }
 if grep -qF -- '-C "$HOME"' "$TMP_HOME/hh3.log"; then
     printf '--no-map 落在了服务器家目录（身份丢失）\n' >&2
     sed 's/^/  /' "$TMP_HOME/hh3.log" >&2
-    exit 1
-fi
-
-# 挂载不可用 + 自动映射：工作目录必须退回设备挂载点，不能留在坏挂载上
-# （身份靠位置：退回共享的 $HOME 会丢掉「本次会话来自哪台设备」）
-# （真机症状：codex 一 chdir 到僵死的 FUSE 挂载就 `Error: I/O error (os error 5)` 退出）
-cat > "$FAKE_BIN/ssh" <<'EOF'
-#!/bin/sh
-printf '%s\n' "$*" >> "$FAKE_SSH_LOG"
-case "$*" in
-    *反向隧道已建立*) printf '✅ 反向隧道已建立\n'; exec sleep 30 ;;
-    *sh\ -s*)        printf 'MOUNT_FAIL\n' ;;
-esac
-exit 0
-EOF
-chmod 755 "$FAKE_BIN/ssh"
-mkdir -p "$TMP_HOME/b9/proj/sub"
-: > "$TMP_HOME/hh4.log"
-env FAKE_SSH_LOG="$TMP_HOME/hh4.log" TERMUX_VERSION=0.118 \
-    PATH="$TMP_HOME/b9:$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
-    DEVICE_ONBOARD_CONFIG_FILE="$TMP_HOME/p9/config" \
-    sh -c "cd $TMP_HOME/b9/proj/sub && exec sh $TMP_HOME/b9/device-harness codex" \
-    > "$TMP_HOME/hh4.out" 2>&1 || true
-
-grep -q '工作目录已退回设备挂载点' "$TMP_HOME/hh4.out" || {
-    printf '挂载不可用时没有提示工作目录已回退：\n' >&2; sed 's/^/  /' "$TMP_HOME/hh4.out" >&2; exit 1
-}
-grep -qF -- '-C "$HOME/xiaomitest"' "$TMP_HOME/hh4.log" || {
-    printf '挂载不可用时工作目录没有退回设备挂载点：\n' >&2; sed 's/^/  /' "$TMP_HOME/hh4.log" >&2; exit 1
-}
-if grep -qF -- '-C "$HOME"' "$TMP_HOME/hh4.log"; then
-    printf '挂载不可用时工作目录留在了服务器家目录（身份丢失）：\n' >&2
-    sed 's/^/  /' "$TMP_HOME/hh4.log" >&2
-    exit 1
-fi
-
-# 回归防护：挂载成功不能靠 ls 判定（空目录 ls 也成功 → 假 OK → codex ENOENT）
-if ! grep -qF 'if mountpoint -q "\$mp" 2>/dev/null && _ls "\$mp"; then' "$ROOT/bin/device-harness"; then
-    printf '挂载成功判定没用 mountpoint（空目录会被误判为挂载成功）\n' >&2
-    exit 1
-fi
-if grep -q 'sshfs .*>/dev/null 2>&1' "$ROOT/bin/device-harness"; then
-    printf 'sshfs 的报错又被丢进 /dev/null 了（失败原因看不到）\n' >&2
     exit 1
 fi
 

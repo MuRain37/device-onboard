@@ -19,12 +19,11 @@ fi
 : "${DEVICE_HOST_ALIAS:?配置缺少 DEVICE_HOST_ALIAS}"
 
 # 选项：
-#   -C <目录>   指定服务器上的工作目录（可指向 sshfs 挂进来的手机目录）
-#   --no-map    不跟随本机目录，harness 落在设备挂载点 ~/<设备ID>（不想要的自动映射可以关掉）
+#   -C <目录>   指定服务器上的工作目录
+#   --no-map    不跟随本机目录，harness 落在设备锚点目录 ~/<设备ID>（不想要的自动映射可以关掉）
 # 之后第一个参数是 harness 命令，剩余参数原样传给它。
 DIR=
 NO_MAP=0
-DIR_AUTO=0
 while [ "$#" -gt 0 ]; do
     case "$1" in
         -C)
@@ -45,15 +44,15 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-# 没给 -C 时，按设备侧当前目录自动映射到服务器挂载点：
-#   设备 $HOME  ↔  服务器 ~/<设备ID>（sshfs 挂载点）
+# 没给 -C 时，按设备侧当前目录自动映射到服务器锚点目录：
+#   设备 $HOME  ↔  服务器 ~/<设备ID>
 # 这样 cd ~/项目 && device-harness 一条命令就够，不用手写 -C，也不用自己换算。
 # 身份靠位置：设备名编码在路径里。所以任何没给 -C 的落点都在 ~/<设备ID>，
 # 绝不落到共享的 $HOME —— 否则「本次会话来自哪台设备」这个信息就丢了。
-# 显式 -C 优先级最高；--no-map 放弃跟随本机目录，但同样落在设备挂载点。
+# 显式 -C 优先级最高；--no-map 放弃跟随本机目录，但同样落在锚点目录。
 if [ -z "$DIR" ]; then
     if [ "$NO_MAP" = 1 ]; then
-        # 不跟随本机目录，直接用设备挂载点根。
+        # 不跟随本机目录，直接用锚点目录根。
         DIR="\$HOME/$DEVICE_ID"
     else
         _dev_home=$HOME
@@ -64,18 +63,15 @@ if [ -z "$DIR" ]; then
         case "$PWD" in
             "$_dev_home")
                 DIR="\$HOME/$DEVICE_ID"
-                DIR_AUTO=1
                 ;;
             "$_dev_home"/*)
                 # 只做精确前缀切片：用 "$_dev_home"/* 限定，避免 /home/ab 误伤 /home/abc；
                 # 整体加引号，路径含空格也撑得住。
                 DIR="\$HOME/$DEVICE_ID${PWD#"$_dev_home"}"
-                DIR_AUTO=1
                 ;;
             *)
                 DIR="\$HOME/$DEVICE_ID"
-                DIR_AUTO=1
-                printf '提示：当前目录 %s 不在设备家目录（%s）下，映射不到服务器挂载点，改用设备挂载点 ~/%s。\n' "$PWD" "$_dev_home" "$DEVICE_ID" >&2
+                printf '提示：当前目录 %s 不在设备家目录（%s）下，映射不到服务器锚点目录，改用锚点目录 ~/%s。\n' "$PWD" "$_dev_home" "$DEVICE_ID" >&2
                 ;;
         esac
     fi
@@ -90,8 +86,7 @@ case "$DIR" in
     '~/'*)  DIR="\$HOME/${DIR#\~/}" ;;
 esac
 
-# 依据 DIR 生成实际发给服务器的命令。挂载不可用而回退工作目录后要再生成一次，
-# 所以这里必须是一个函数 —— 只要 $DIR 变了就得重建。
+# 依据 DIR 生成实际发给服务器的命令。
 build_run_cmd() {
     if [ -n "$DIR" ]; then
         case "$HARNESS_CMD" in
@@ -180,72 +175,6 @@ if ! grep -q '反向隧道已建立' "$READY_FILE" 2>/dev/null; then
 fi
 
 printf '隧道就绪。在服务器上启动 %s（退出后隧道自动收起）…\n\n' "$HARNESS_CMD"
-
-# 隧道就绪后，确保服务器上 ~/<设备ID> 是活着的 sshfs 挂载：
-#   没挂           → 挂上
-#   挂了但访问卡住 → 先摘掉再重挂（探测一律带 timeout，别让一次卡死拖垮整条流程）
-# 挂载失败不影响 harness 启动；退出时也刻意不摘（留给下次直接用）。
-# 挂载发生在服务器上，源用设备档案里的 onboard-device-<id> 别名。
-# DEVICE_ONBOARD_NO_MOUNT=1 可跳过。
-if [ "${DEVICE_ONBOARD_NO_MOUNT:-0}" = "1" ]; then
-    printf '按 DEVICE_ONBOARD_NO_MOUNT=1 跳过服务器 sshfs 挂载。\n'
-else
-    mount_script=$(cat <<REMOTE_MOUNT_EOF
-set +e
-mp="\$HOME/$DEVICE_ID"
-mkdir -p "\$mp" 2>/dev/null && chmod 755 "\$mp" 2>/dev/null
-_ls() { if command -v timeout >/dev/null 2>&1; then timeout 3 ls "\$1" >/dev/null 2>&1; else ls "\$1" >/dev/null 2>&1; fi; }
-if mountpoint -q "\$mp" 2>/dev/null; then
-    if _ls "\$mp"; then
-        echo MOUNT_ALREADY
-        exit 0
-    fi
-    fusermount -u "\$mp" >/dev/null 2>&1 || umount "\$mp" >/dev/null 2>&1 || true
-    fusermount -uz "\$mp" >/dev/null 2>&1 || umount -l "\$mp" >/dev/null 2>&1 || true
-    # 僵死的 FUSE 挂载有时连上面两步都不吃，只能把对应的 sshfs 进程按 PID 收掉。
-    if mountpoint -q "\$mp" 2>/dev/null; then
-        for _p in \$(ps -eo pid,args 2>/dev/null | grep "[s]shfs.*\$mp" | awk '{print \$1}'); do
-            kill "\$_p" >/dev/null 2>&1 || true
-        done
-        sleep 1
-        fusermount -uz "\$mp" >/dev/null 2>&1 || true
-    fi
-fi
-# 绝不能拿「ls 空目录」当挂载成功的证据 —— 空目录 ls 也会成功，会假报 MOUNT_OK，
-# 接着 codex 在空挂载点上 chdir，得到「Error: No such file or directory (os error 2)」
-# （真机踩过）。必须用 mountpoint 验证，并且别再吞掉 sshfs 的报错，失败要看得到原因。
-# 注意：这里是未引用的 heredoc，命令替换要写成 \$( ) 转义形式，否则会在设备本地就执行 sshfs。
-mount_err=\$(sshfs $DEVICE_HOST_ALIAS: "\$mp" -o reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,idmap=user,follow_symlinks 2>&1) || true
-if mountpoint -q "\$mp" 2>/dev/null && _ls "\$mp"; then
-    echo MOUNT_OK
-else
-    echo MOUNT_FAIL
-    printf '%s\n' "\$mount_err" | head -3
-fi
-REMOTE_MOUNT_EOF
-)
-    mount_out=$(printf '%s\n' "$mount_script" | ssh "$SERVER_HOST_ALIAS" 'sh -s' 2>&1 || true)
-    case "$mount_out" in
-        *MOUNT_ALREADY*) printf '服务器 sshfs 挂载已就绪（~/%s）。\n' "$DEVICE_ID" ;;
-        *MOUNT_OK*)      printf '已在服务器上挂好 sshfs（~/%s）。\n' "$DEVICE_ID" ;;
-        *)
-            # 把 sshfs 的真实报错带出来，不然只剩一句「未就绪」，查不出原因。
-            _mnt_err=$(printf '%s' "$mount_out" | grep -v '^MOUNT_FAIL$' | grep -v '^$' | head -2 | tr '\n' ' ')
-            [ -n "$_mnt_err" ] && printf '警告：服务器 sshfs 挂载失败：%s\n' "$_mnt_err" >&2
-            # 挂载不可用时绝不能把工作目录留在坏挂载上：codex 一 chdir 就
-            # `Error: I/O error (os error 5)` 直接退出（实测，栈：僵死的 FUSE 挂载）。
-            # 自动映射/回退来的目录改落设备挂载点 ~/<设备ID>（身份靠位置）；显式 -C 只警告。
-            if [ "$DIR_AUTO" = 1 ]; then
-                printf '警告：服务器 sshfs 挂载不可用，工作目录已退回设备挂载点（~/%s）。\n' "$DEVICE_ID" >&2
-                DIR="\$HOME/$DEVICE_ID"
-                build_run_cmd
-                [ "$#" -gt 0 ] && RUN_CMD="$RUN_CMD $*"
-            else
-                printf '警告：服务器 sshfs 挂载未就绪（工作目录是你用 -C 定的，保持不动）。\n' >&2
-            fi
-            ;;
-    esac
-fi
 
 # 把「本次会话来自哪台设备」交给 harness。变量名和用法写在服务器上那份设备档案里，
 # 而档案的 description 在会话一开始就可见 —— 所以 harness 知道该来查这两个变量。
