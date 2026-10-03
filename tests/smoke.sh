@@ -271,6 +271,62 @@ if ! ssh -F "$TMP_HOME/.ssh/config" -G onboard-tunnel-xiaomitest >/dev/null 2>&1
     exit 1
 fi
 
+# --- ~/.codex/AGENTS.md：设备会话说明块（首次创建、幂等、块外不动、可跳过）---
+# Codex 只读 ~/.codex/AGENTS.md（不读 ~/.agents/AGENTS.md），所以块必须写在这里。
+# 假 ssh 对 'sh -s' 直接本地执行，于是这段远端脚本真的在 $TMP_HOME 下落盘。
+
+AGENTS_MD="$TMP_HOME/.codex/AGENTS.md"
+
+run_full_install_again() {
+    printf '1\nxiaomitest\n134.175.91.169\nubuntu\n22\n' | env FAKE_SSH_LOG="$TMP_HOME/full.log" FAKE_SSHFS_LOG="$TMP_HOME/full-sshfs.log" TERMUX_VERSION=0.118 PATH="$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
+        DEVICE_ONBOARD_REVERSE_PORT_START=2230 DEVICE_ONBOARD_REVERSE_PORT_END=2230 \
+        DEVICE_ONBOARD_CONFIG_DIR="$TMP_HOME/p9" DEVICE_ONBOARD_KEY_DIR="$TMP_HOME/k9" DEVICE_ONBOARD_BIN_DIR="$TMP_HOME/b9" \
+        sh "$ROOT/install.sh" >/tmp/device-onboard-smoke.out 2>&1 || true
+}
+
+# 首次：文件不存在 → 创建，含块，权限 600
+[ -f "$AGENTS_MD" ] || { printf '首次接入没有创建 ~/.codex/AGENTS.md\n' >&2; exit 1; }
+agents_mode=$(stat -c %a "$AGENTS_MD" 2>/dev/null || stat -f %Lp "$AGENTS_MD")
+[ "$agents_mode" = 600 ] || { printf 'AGENTS.md 权限不是 600（是 %s）\n' "$agents_mode" >&2; exit 1; }
+grep -q '<!-- DEVICE-ONBOARD-AGENTS BEGIN -->' "$AGENTS_MD" || { printf 'AGENTS.md 缺少起始标记\n' >&2; exit 1; }
+grep -q '<!-- DEVICE-ONBOARD-AGENTS END -->' "$AGENTS_MD" || { printf 'AGENTS.md 缺少结束标记\n' >&2; exit 1; }
+grep -q '## 设备会话' "$AGENTS_MD" || { printf 'AGENTS.md 缺少块标题\n' >&2; exit 1; }
+grep -q 'DEVICE_ONBOARD_ID' "$AGENTS_MD" || { printf 'AGENTS.md 没说明看 DEVICE_ONBOARD_ID\n' >&2; exit 1; }
+grep -q '~/.codex/skills/device-onboard/SKILL.md' "$AGENTS_MD" || { printf 'AGENTS.md 没指向设备档案\n' >&2; exit 1; }
+
+# 二次运行：块整体替换、不重复累加；块外内容原样保留
+printf '这行不在块里，必须原样保留。\n' >> "$AGENTS_MD"
+rm -f "$TMP_HOME/p9/config"
+run_full_install_again
+[ "$(grep -c 'DEVICE-ONBOARD-AGENTS BEGIN' "$AGENTS_MD")" = 1 ] || {
+    printf '二次运行把 AGENTS.md 的块写重复了：\n' >&2; sed 's/^/  /' "$AGENTS_MD" >&2; exit 1
+}
+grep -q '这行不在块里，必须原样保留。' "$AGENTS_MD" || { printf 'AGENTS.md 块外内容被改动\n' >&2; exit 1; }
+
+# 文件里有其它内容但没有块 → 追加块，块外内容保留
+awk '/<!-- DEVICE-ONBOARD-AGENTS BEGIN -->/{skip=1;next} /<!-- DEVICE-ONBOARD-AGENTS END -->/{skip=0;next} !skip{print}' "$AGENTS_MD" > "$AGENTS_MD.tmp" && mv "$AGENTS_MD.tmp" "$AGENTS_MD"
+if grep -q 'DEVICE-ONBOARD-AGENTS BEGIN' "$AGENTS_MD"; then
+    printf '测试准备失败：块没有被去掉\n' >&2; exit 1
+fi
+rm -f "$TMP_HOME/p9/config"
+run_full_install_again
+grep -q '<!-- DEVICE-ONBOARD-AGENTS BEGIN -->' "$AGENTS_MD" || { printf '无块文件没有追加块\n' >&2; exit 1; }
+[ "$(grep -c 'DEVICE-ONBOARD-AGENTS BEGIN' "$AGENTS_MD")" = 1 ] || { printf '追加块时写重复了\n' >&2; exit 1; }
+grep -q '这行不在块里，必须原样保留。' "$AGENTS_MD" || { printf '追加块时块外内容被改动\n' >&2; exit 1; }
+
+# DEVICE_ONBOARD_AGENTS_MD=0 → 跳过，不创建（接入照常完成）
+rm -f "$AGENTS_MD" "$TMP_HOME/p9/config"
+printf '1\nxiaomitest\n134.175.91.169\nubuntu\n22\n' | env DEVICE_ONBOARD_AGENTS_MD=0 FAKE_SSH_LOG="$TMP_HOME/full.log" FAKE_SSHFS_LOG="$TMP_HOME/full-sshfs.log" TERMUX_VERSION=0.118 PATH="$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
+    DEVICE_ONBOARD_REVERSE_PORT_START=2230 DEVICE_ONBOARD_REVERSE_PORT_END=2230 \
+    DEVICE_ONBOARD_CONFIG_DIR="$TMP_HOME/p9" DEVICE_ONBOARD_KEY_DIR="$TMP_HOME/k9" DEVICE_ONBOARD_BIN_DIR="$TMP_HOME/b9" \
+    sh "$ROOT/install.sh" >/tmp/device-onboard-smoke.out 2>&1 || true
+if [ -e "$AGENTS_MD" ]; then
+    printf 'DEVICE_ONBOARD_AGENTS_MD=0 却仍然写了 AGENTS.md：\n' >&2; sed 's/^/  /' "$AGENTS_MD" >&2; exit 1
+fi
+grep -q '设备接入完成' /tmp/device-onboard-smoke.out || {
+    printf 'DEVICE_ONBOARD_AGENTS_MD=0 时接入没有正常完成：\n' >&2; sed 's/^/  /' /tmp/device-onboard-smoke.out >&2; exit 1
+}
+
 # --- device-harness：一键（后台隧道 + 前台 harness + 退出收尾）---
 
 mkdir -p "$TMP_HOME/hh"
@@ -405,15 +461,20 @@ grep -qF -- '-C "$HOME/xiaomitest/proj space/sub"' "$TMP_HOME/auto-space.log" ||
     exit 1
 }
 
-# ② PWD 不在 $HOME 下 → 退回服务器 ~，并说明原因
+# ② PWD 不在 $HOME 下 → 退回设备挂载点 ~/<设备ID>，并说明原因
+# （身份靠位置：落在共享的 $HOME 会丢掉「本次会话来自哪台设备」）
 OUTSIDE=$(mktemp -d)
 auto_case outside "$OUTSIDE" codex
 rm -rf "$OUTSIDE"
-grep -qF -- '-C "$HOME"' "$TMP_HOME/auto-outside.log" || {
-    printf '不在家目录下时没退回服务器 ~：\n' >&2
+grep -qF -- '-C "$HOME/xiaomitest"' "$TMP_HOME/auto-outside.log" || {
+    printf '不在家目录下时没退回设备挂载点：\n' >&2
     sed 's/^/  /' "$TMP_HOME/auto-outside.log" >&2
     exit 1
 }
+if grep -qF -- '-C "$HOME"' "$TMP_HOME/auto-outside.log"; then
+    printf '不在家目录下时退回了服务器家目录（身份丢失）\n' >&2
+    exit 1
+fi
 grep -q '不在设备家目录' "$TMP_HOME/auto-outside.out" || {
     printf '不在家目录下时没有给出提示：\n' >&2
     sed 's/^/  /' "$TMP_HOME/auto-outside.out" >&2
@@ -570,7 +631,7 @@ if [ -s "$TMP_HOME/skip-sshfs.log" ]; then
     exit 1
 fi
 
-# --no-map：不跟随本机目录，命令里不该出现 -C
+# --no-map：不跟随本机目录，但仍落在设备挂载点（身份靠位置）
 cat > "$FAKE_BIN/ssh" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >> "$FAKE_SSH_LOG"
@@ -589,13 +650,19 @@ env FAKE_SSH_LOG="$TMP_HOME/hh3.log" TERMUX_VERSION=0.118 \
 grep -q 'codex --no-daemon' "$TMP_HOME/hh3.log" || {
     printf '--no-map 时没正常启动 codex\n' >&2; sed 's/^/  /' "$TMP_HOME/hh3.log" >&2; exit 1
 }
-if grep -q -- '-C ' "$TMP_HOME/hh3.log"; then
-    printf '--no-map 时仍然带了 -C（不该跟随本机路径）\n' >&2
+grep -qF -- '-C "$HOME/xiaomitest"' "$TMP_HOME/hh3.log" || {
+    printf '--no-map 没把工作目录落在设备挂载点：\n' >&2
+    sed 's/^/  /' "$TMP_HOME/hh3.log" >&2
+    exit 1
+}
+if grep -qF -- '-C "$HOME"' "$TMP_HOME/hh3.log"; then
+    printf '--no-map 落在了服务器家目录（身份丢失）\n' >&2
     sed 's/^/  /' "$TMP_HOME/hh3.log" >&2
     exit 1
 fi
 
-# 挂载不可用 + 自动映射：工作目录必须退回服务器家目录，不能留在坏挂载上
+# 挂载不可用 + 自动映射：工作目录必须退回设备挂载点，不能留在坏挂载上
+# （身份靠位置：退回共享的 $HOME 会丢掉「本次会话来自哪台设备」）
 # （真机症状：codex 一 chdir 到僵死的 FUSE 挂载就 `Error: I/O error (os error 5)` 退出）
 cat > "$FAKE_BIN/ssh" <<'EOF'
 #!/bin/sh
@@ -615,14 +682,14 @@ env FAKE_SSH_LOG="$TMP_HOME/hh4.log" TERMUX_VERSION=0.118 \
     sh -c "cd $TMP_HOME/b9/proj/sub && exec sh $TMP_HOME/b9/device-harness codex" \
     > "$TMP_HOME/hh4.out" 2>&1 || true
 
-grep -q '工作目录已退回服务器家目录' "$TMP_HOME/hh4.out" || {
+grep -q '工作目录已退回设备挂载点' "$TMP_HOME/hh4.out" || {
     printf '挂载不可用时没有提示工作目录已回退：\n' >&2; sed 's/^/  /' "$TMP_HOME/hh4.out" >&2; exit 1
 }
-grep -q -- '-C "\$HOME"' "$TMP_HOME/hh4.log" || {
-    printf '挂载不可用时工作目录没有退回服务器家目录：\n' >&2; sed 's/^/  /' "$TMP_HOME/hh4.log" >&2; exit 1
+grep -qF -- '-C "$HOME/xiaomitest"' "$TMP_HOME/hh4.log" || {
+    printf '挂载不可用时工作目录没有退回设备挂载点：\n' >&2; sed 's/^/  /' "$TMP_HOME/hh4.log" >&2; exit 1
 }
-if grep -q -- '-C "\$HOME/' "$TMP_HOME/hh4.log"; then
-    printf '挂载不可用却仍把工作目录指向挂载点（会 I/O error）：\n' >&2
+if grep -qF -- '-C "$HOME"' "$TMP_HOME/hh4.log"; then
+    printf '挂载不可用时工作目录留在了服务器家目录（身份丢失）：\n' >&2
     sed 's/^/  /' "$TMP_HOME/hh4.log" >&2
     exit 1
 fi

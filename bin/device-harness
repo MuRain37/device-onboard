@@ -20,7 +20,7 @@ fi
 
 # 选项：
 #   -C <目录>   指定服务器上的工作目录（可指向 sshfs 挂进来的手机目录）
-#   --no-map    不跟随本机目录，harness 就用服务器家目录（不想要的自动映射可以关掉）
+#   --no-map    不跟随本机目录，harness 落在设备挂载点 ~/<设备ID>（不想要的自动映射可以关掉）
 # 之后第一个参数是 harness 命令，剩余参数原样传给它。
 DIR=
 NO_MAP=0
@@ -48,29 +48,37 @@ done
 # 没给 -C 时，按设备侧当前目录自动映射到服务器挂载点：
 #   设备 $HOME  ↔  服务器 ~/<设备ID>（sshfs 挂载点）
 # 这样 cd ~/项目 && device-harness 一条命令就够，不用手写 -C，也不用自己换算。
-# 显式 -C 优先级最高；--no-map 直接放弃自动映射（DIR 留空 = 用服务器家目录）。
-if [ -z "$DIR" ] && [ "$NO_MAP" = 0 ]; then
-    _dev_home=$HOME
-    # 去掉家目录末尾的斜杠，免得拼出 //。
-    case "$_dev_home" in
-        */) _dev_home=${_dev_home%/} ;;
-    esac
-    case "$PWD" in
-        "$_dev_home")
-            DIR="\$HOME/$DEVICE_ID"
-            DIR_AUTO=1
-            ;;
-        "$_dev_home"/*)
-            # 只做精确前缀切片：用 "$_dev_home"/* 限定，避免 /home/ab 误伤 /home/abc；
-            # 整体加引号，路径含空格也撑得住。
-            DIR="\$HOME/$DEVICE_ID${PWD#"$_dev_home"}"
-            DIR_AUTO=1
-            ;;
-        *)
-            DIR='$HOME'
-            printf '提示：当前目录 %s 不在设备家目录（%s）下，映射不到服务器挂载点，改用服务器家目录。\n' "$PWD" "$_dev_home" >&2
-            ;;
-    esac
+# 身份靠位置：设备名编码在路径里。所以任何没给 -C 的落点都在 ~/<设备ID>，
+# 绝不落到共享的 $HOME —— 否则「本次会话来自哪台设备」这个信息就丢了。
+# 显式 -C 优先级最高；--no-map 放弃跟随本机目录，但同样落在设备挂载点。
+if [ -z "$DIR" ]; then
+    if [ "$NO_MAP" = 1 ]; then
+        # 不跟随本机目录，直接用设备挂载点根。
+        DIR="\$HOME/$DEVICE_ID"
+    else
+        _dev_home=$HOME
+        # 去掉家目录末尾的斜杠，免得拼出 //。
+        case "$_dev_home" in
+            */) _dev_home=${_dev_home%/} ;;
+        esac
+        case "$PWD" in
+            "$_dev_home")
+                DIR="\$HOME/$DEVICE_ID"
+                DIR_AUTO=1
+                ;;
+            "$_dev_home"/*)
+                # 只做精确前缀切片：用 "$_dev_home"/* 限定，避免 /home/ab 误伤 /home/abc；
+                # 整体加引号，路径含空格也撑得住。
+                DIR="\$HOME/$DEVICE_ID${PWD#"$_dev_home"}"
+                DIR_AUTO=1
+                ;;
+            *)
+                DIR="\$HOME/$DEVICE_ID"
+                DIR_AUTO=1
+                printf '提示：当前目录 %s 不在设备家目录（%s）下，映射不到服务器挂载点，改用设备挂载点 ~/%s。\n' "$PWD" "$_dev_home" "$DEVICE_ID" >&2
+                ;;
+        esac
+    fi
 fi
 
 # 目录是「服务器上」的路径。~ 要留给服务器展开：
@@ -226,10 +234,10 @@ REMOTE_MOUNT_EOF
             [ -n "$_mnt_err" ] && printf '警告：服务器 sshfs 挂载失败：%s\n' "$_mnt_err" >&2
             # 挂载不可用时绝不能把工作目录留在坏挂载上：codex 一 chdir 就
             # `Error: I/O error (os error 5)` 直接退出（实测，栈：僵死的 FUSE 挂载）。
-            # 自动映射来的目录就退回服务器家目录并说清楚；显式 -C 是用户点的，只警告。
+            # 自动映射/回退来的目录改落设备挂载点 ~/<设备ID>（身份靠位置）；显式 -C 只警告。
             if [ "$DIR_AUTO" = 1 ]; then
-                printf '警告：服务器 sshfs 挂载不可用，工作目录已退回服务器家目录（~）。\n' >&2
-                DIR='$HOME'
+                printf '警告：服务器 sshfs 挂载不可用，工作目录已退回设备挂载点（~/%s）。\n' "$DEVICE_ID" >&2
+                DIR="\$HOME/$DEVICE_ID"
                 build_run_cmd
                 [ "$#" -gt 0 ] && RUN_CMD="$RUN_CMD $*"
             else

@@ -35,6 +35,7 @@ flowchart LR
     subgraph SRV["服务器（Ubuntu）"]
         SSH["sshd"]
         ARCH["设备档案<br/>~/.codex/skills/device-onboard/SKILL.md"]
+        AGENTS["全局指令<br/>~/.codex/AGENTS.md 设备会话块"]
         MP["挂载点<br/>~/&lt;设备名&gt;"]
         RUN["harness（codex）<br/>工作目录可指向设备文件夹"]
         REPO["~/.ssh/config<br/>Host onboard-device-&lt;设备名&gt;"]
@@ -42,6 +43,7 @@ flowchart LR
 
     I -->|"生成密钥 / 交换公钥 / 写 config"| SSH
     I -->|"写档案"| ARCH
+    I -->|"写设备会话块（幂等）"| AGENTS
     I -->|"装 sshfs + 建挂载点 + 试挂验证"| MP
     I -->|"写回连 Host 块"| REPO
 
@@ -73,6 +75,7 @@ sequenceDiagram
     D->>D: 写设备侧 ~/.ssh/config<br/>Host onboard-server-&lt;设备名&gt;
     S->>S: 写服务器侧 ~/.ssh/config<br/>Host onboard-device-&lt;设备名&gt;（含 RemoteForward）
     D->>S: 建设备档案到 ~/.codex/skills/device-onboard/
+    D->>S: 写 ~/.codex/AGENTS.md 设备会话块（幂等）
     D->>S: 反向通道真握手验证
     Note over D,S: 让服务器在探测端口上主动连回设备一次<br/>必须回显 DEVICE-ONBOARD-E2E-OK 才算通
     D->>S: 配置服务器端 sshfs
@@ -86,6 +89,8 @@ sequenceDiagram
 - **端到端验证**：不是"绑上端口就算通"，而是让服务器**真连回来握一次手**——
   绑上但握手失败会立刻中止，并明确告诉你"换端口没用"。
 - **sshfs 任何一步失败都不影响接入**，只打警告（服务器可能没有 apt、可能是 macOS）。
+- **`~/.codex/AGENTS.md` 用独立标记块维护**：块已存在就整体替换、不存在就追加、文件不存在就创建，
+  块以外的内容一律不动；回滚不管它。`DEVICE_ONBOARD_AGENTS_MD=0` 可跳过。
 - **首次接入路径带失败回滚**：半路挂了会按标记撤销、还原备份。
 - **"已有配置"重跑会走跳过路径**，那条路径**绝不改动** `~/.ssh/config`。
 
@@ -167,17 +172,21 @@ flowchart TD
 | 情况 | 工作目录 | 说明 |
 |---|---|---|
 | 显式 `-C <目录>` | 用它 | 只做 `~` → `$HOME` 的转换，交给服务器展开 |
-| `--no-map` | 服务器家目录 | 明确"不要跟随本机目录" |
+| `--no-map` | 设备挂载点 `~/<设备名>` | 不跟随本机目录，但仍落在设备根（身份靠位置） |
 | 默认，且 `$PWD` 在设备家目录下 | 服务器 `~/<设备名>/<相对路径>` | 自动映射 |
-| 默认，但 `$PWD` 不在设备家目录下 | 服务器家目录 + 提示 | 比如手机上的 `/sdcard/...` |
-| 挂载不可用，而目录是**自动映射**来的 | 服务器家目录 + 警告 | 见 §6 |
+| 默认，但 `$PWD` 不在设备家目录下 | 设备挂载点 `~/<设备名>` + 提示 | 比如手机上的 `/sdcard/...` |
+| 挂载不可用，而目录是**自动映射/回退**来的 | 设备挂载点 `~/<设备名>` + 警告 | 见 §6 |
 | 挂载不可用，但目录是**你用 `-C` 点的** | 保持不动 + 警告 | 不擅自改你指定的东西 |
+
+**身份靠位置**：设备的身份由工作目录里的设备名编码。所以任何「没给 `-C`」的落点都在
+`~/<设备名>`，**绝不落到共享的服务器家目录 `$HOME`**——否则「本次会话来自哪台设备」这个
+信息就丢了。只有显式 `-C` 才由你说了算。
 
 ```mermaid
 flowchart LR
     P["设备上的 $PWD"] --> Q{"在设备家目录 $HOME 下吗"}
     Q -- 是 --> R["映射：<br/>$HOME/x/y → 服务器 ~/&lt;设备名&gt;/x/y"]
-    Q -- 否 --> S["服务器家目录 + 提示原因"]
+    Q -- 否 --> S["设备挂载点 ~/&lt;设备名&gt; + 提示"]
     R --> T["交给服务器上的 codex -C"]
     S --> T
 ```
@@ -209,14 +218,14 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-    E1["第 1 层：工作目录回退<br/>挂载不可用 → 自动映射的目录退回服务器家目录"] --> E2["第 2 层：报错不再被吞<br/>sshfs 的真实报错直接打给你看"]
+    E1["第 1 层：工作目录回退<br/>挂载不可用 → 自动映射的目录退回设备挂载点 ~/&lt;设备名&gt;"] --> E2["第 2 层：报错不再被吞<br/>sshfs 的真实报错直接打给你看"]
     E2 --> E3["第 3 层：隧道自检<br/>起隧道前确认设备 sshd 在跑，避免空壳隧道"]
 ```
 
 对应用户能看到的：
 
-- 挂载失败 → `警告：服务器 sshfs 挂载不可用，工作目录已退回服务器家目录（~）。`
-  —— harness **照常启动**，你不会被卡住。
+- 挂载失败 → `警告：服务器 sshfs 挂载不可用，工作目录已退回设备挂载点（~/<设备名>）。`
+  —— harness **照常启动**，你不会被卡住。落点仍是本设备的挂载点，不会串到共享家目录。
 - 挂载失败 → `警告：服务器 sshfs 挂载失败：<sshfs 的原话>`
   —— 一眼就知道是网络、认证还是别的。
 - 起隧道时设备 sshd 没跑 → `本机 sshd 没在跑，先拉起来…`
@@ -246,6 +255,10 @@ flowchart TD
   —— 一个 skill 记所有设备，每台一个块；还有一个放在所有设备块之外的
   **共享约定块**，说明"本次会话来自哪台设备"以环境变量形式传进来
   （`DEVICE_ONBOARD_ID`、`DEVICE_ONBOARD_DEVICE_ALIAS`）。
+- **全局指令**：`~/.codex/AGENTS.md` 里的「设备会话」标记块（设备接入时幂等写入；
+  codex 只读这个文件，不读 `~/.agents/AGENTS.md`）
+  —— 让 codex 一眼知道：有 `DEVICE_ONBOARD_ID` 就是设备会话、设备目录在 `~/<设备名>`，
+  没有就是普通服务器会话，别瞎猜。
 - **回连入口**：`~/.ssh/config` 里的 `Host onboard-device-<设备名>`
   （`127.0.0.1:<REVERSE_PORT>`）。
 - **挂载点**：`~/<设备名>`。
@@ -261,7 +274,7 @@ flowchart TD
 | 首次接入 | 设备 | `sh install.sh` |
 | 只开隧道 | 设备 | `device-tunnel` |
 | 一键干活（跟随当前目录） | 设备 | `device-harness` |
-| 一键干活（服务器家目录） | 设备 | `device-harness --no-map` |
+| 一键干活（落在设备挂载点 `~/<设备名>`） | 设备 | `device-harness --no-map` |
 | 一键干活（指定服务器目录） | 设备 | `device-harness -C '~/xiaomi/项目'` |
 | 进服务器 | 设备 | `ssh onboard-server-<设备名>` |
 | 从服务器操作设备 | 服务器 | `ssh onboard-device-<设备名> '<命令>'` |
