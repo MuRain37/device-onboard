@@ -36,23 +36,20 @@ flowchart LR
         SSH["sshd"]
         ARCH["设备档案<br/>~/.codex/skills/device-onboard/SKILL.md"]
         AGENTS["全局指令<br/>~/.codex/AGENTS.md 设备会话块"]
-        ANCHOR["项目锚点<br/>~/&lt;设备名&gt;"]
-        RUN["harness（codex）<br/>工作目录在 ~/&lt;设备名&gt;"]
+        RUN["harness（codex）<br/>工作目录默认在服务器家目录"]
         REPO["~/.ssh/config<br/>Host onboard-device-&lt;设备名&gt;"]
     end
 
     I -->|"生成密钥 / 交换公钥 / 写 config"| SSH
     I -->|"写档案"| ARCH
     I -->|"写设备会话块（幂等）"| AGENTS
-    I -->|"建项目锚点目录（mkdir -p ~/&lt;设备名&gt;）"| ANCHOR
     I -->|"写回连 Host 块"| REPO
 
     T -->|"反向隧道<br/>服务器 127.0.0.1:&lt;REVERSE_PORT&gt; → 设备 localhost:&lt;DEVICE_PORT&gt;"| SSH
     H --> T
     H -->|"ssh -t 启动"| RUN
     RUN -.->|"读档案了解这台设备"| ARCH
-    RUN -->|"工作目录"| ANCHOR
-    ANCHOR -.->|"设备文件经 ssh/scp 读写"| SSH
+    RUN -.->|"设备文件经 ssh/scp 读写"| SSH
 ```
 
 ---
@@ -78,7 +75,6 @@ sequenceDiagram
     D->>S: 写 ~/.codex/AGENTS.md 设备会话块（幂等）
     D->>S: 反向通道真握手验证
     Note over D,S: 让服务器在探测端口上主动连回设备一次<br/>必须回显 DEVICE-ONBOARD-E2E-OK 才算通
-    D->>S: 建项目锚点目录 ~/&lt;设备名&gt;（mkdir -p + chmod 755）
     D->>U: 完成，打印用法
 ```
 
@@ -87,8 +83,9 @@ sequenceDiagram
 - **密码由你手输**，脚本不保存、不落盘。
 - **端到端验证**：不是"绑上端口就算通"，而是让服务器**真连回来握一次手**——
   绑上但握手失败会立刻中止，并明确告诉你"换端口没用"。
-- **项目锚点目录 `~/<设备名>` 由接入时幂等创建**（`mkdir -p` + `chmod 755`），是设备的身份锚点、
-  也是 harness 的默认工作目录；设备里的文件改用 `ssh onboard-device-<设备名>` / `scp` 读写。
+- **设备身份只走环境变量**：`DEVICE_ONBOARD_ID` / `DEVICE_ONBOARD_DEVICE_ALIAS` 由
+  `device-harness` 在 `ssh -t` 时传进服务器会话，用来判断「本次会话来自哪台设备」；
+  设备里的文件用 `ssh onboard-device-<设备名>` / `scp` 读写。
 - **`~/.codex/AGENTS.md` 用独立标记块维护**：块已存在就整体替换、不存在就追加、文件不存在就创建，
   块以外的内容一律不动；回滚不管它。`DEVICE_ONBOARD_AGENTS_MD=0` 可跳过。
 - **首次接入路径带失败回滚**：半路挂了会按标记撤销、还原备份。
@@ -125,7 +122,7 @@ flowchart TD
 ## 4. 日常之二：`device-harness`（一键，在设备上跑）
 
 ```
-device-harness [--no-map] [-C <服务器上的目录>] [harness 命令] [命令参数...]
+device-harness [-C <服务器上的目录>] [harness 命令] [命令参数...]
 ```
 
 它是**编排层**：把隧道和 harness 的生命期绑在一起，干完自动收拾。
@@ -133,7 +130,7 @@ device-harness [--no-map] [-C <服务器上的目录>] [harness 命令] [命令�
 ```mermaid
 flowchart TD
     A["启动 device-harness"] --> B["读配置，校验<br/>DEVICE_ID / 别名 / 端口"]
-    B --> C["解析选项<br/>-C 与 --no-map 可任意顺序"]
+    B --> C["解析选项 -C（可省略）"]
     C --> D{"要起什么 harness<br/>默认 codex"}
     D -->|codex*| D1["自动补 --no-daemon<br/>理由见 §8"]
     C --> E["后台起 device-tunnel<br/>输出重定向到日志文件"]
@@ -145,40 +142,25 @@ flowchart TD
     J --> K["EXIT trap 收掉隧道"]
 ```
 
-## 5. 工作目录是怎么定的（优先级从高到低）
+## 5. 工作目录是怎么定的
 
 | 情况 | 工作目录 | 说明 |
 |---|---|---|
 | 显式 `-C <目录>` | 用它 | 只做 `~` → `$HOME` 的转换，交给服务器展开 |
-| `--no-map` | 项目锚点 `~/<设备名>` | 不跟随本机目录，但仍落在设备根（身份靠位置） |
-| 默认，且 `$PWD` 在设备家目录下 | 服务器 `~/<设备名>/<相对路径>` | 自动映射 |
-| 默认，但 `$PWD` 不在设备家目录下 | 项目锚点 `~/<设备名>` + 提示 | 比如手机上的 `/sdcard/...` |
+| 默认（不给 `-C`） | 服务器家目录 `$HOME` | 设备身份不靠工作目录表示 |
 
-**身份靠位置**：设备的身份由工作目录里的设备名编码。所以任何「没给 `-C`」的落点都在
-`~/<设备名>`，**绝不落到共享的服务器家目录 `$HOME`**——否则「本次会话来自哪台设备」这个
-信息就丢了。只有显式 `-C` 才由你说了算。
-
-```mermaid
-flowchart LR
-    P["设备上的 $PWD"] --> Q{"在设备家目录 $HOME 下吗"}
-    Q -- 是 --> R["映射：<br/>$HOME/x/y → 服务器 ~/&lt;设备名&gt;/x/y"]
-    Q -- 否 --> S["项目锚点 ~/&lt;设备名&gt; + 提示"]
-    R --> T["交给服务器上的 codex -C"]
-    S --> T
-```
-
-**这个目录是"身份锚点"而不是"同步副本"**：服务器上的 `~/<设备名>` 是一个普通目录，
-只用来标记"本次会话属于哪台设备"、并作为 harness 的默认工作目录。设备里的文件**不**在这里，
-要用 `ssh onboard-device-<设备名>` / `scp` 直接读写设备。
+**身份只走环境变量**：`device-harness` 在 `ssh -t` 时把 `DEVICE_ONBOARD_ID` 与
+`DEVICE_ONBOARD_DEVICE_ALIAS` 传进服务器会话，harness（codex）据此知道「本次会话来自哪台设备」。
+工作目录跟设备身份无关，所以默认落在共享的服务器家目录；需要别的目录时用 `-C` 显式指定。
 
 ---
 
-## 6. 项目锚点目录 `~/<设备名>`
+## 6. 设备身份怎么传
 
-- **它是什么**：服务器上一个**普通目录**，由接入时幂等创建（`mkdir -p` + `chmod 755`）。
-  它不再挂任何东西，但**要保留**——设备的身份由目录位置编码。
-- **它有什么用**：作为这台设备在服务器上的"项目锚点"，也是服务器上 harness 的默认工作目录。
-  有 `DEVICE_ONBOARD_ID` 时 harness 的落点就在 `~/<设备名>`，一眼能看出会话来自哪台设备。
+- **只看环境变量**：服务器上的 harness 会话若带着 `DEVICE_ONBOARD_ID`，值就是发起本次会话的设备名；
+  配合 `DEVICE_ONBOARD_DEVICE_ALIAS` 可以直接 `ssh "$DEVICE_ONBOARD_DEVICE_ALIAS"` 回到设备。
+- **不靠工作目录**：没有 `~/<设备名>` 这类锚点目录，harness 默认在服务器家目录里干活；
+  是否来自设备一律以环境变量为准。
 - **设备里的文件怎么读**：不再同步文件，直接用
   `ssh onboard-device-<设备名> '<命令>'` 或 `scp` 读写设备，简单直接。
 
@@ -187,7 +169,7 @@ flowchart LR
 ## 7. 出错时的退路
 
 - **隧道自检**：起隧道前确认设备 sshd 在跑，避免"端口绑上、却连不回设备"的空壳隧道。
-- **身份不丢**：任何自动映射的落点都在 `~/<设备名>`，绝不落到共享的服务器家目录。
+- **身份不丢**：设备身份由 `DEVICE_ONBOARD_ID` 环境变量携带，不受工作目录影响。
 
 对应用户能看到的：
 
@@ -221,13 +203,11 @@ flowchart LR
   （`DEVICE_ONBOARD_ID`、`DEVICE_ONBOARD_DEVICE_ALIAS`）。
 - **全局指令**：`~/.codex/AGENTS.md` 里的「设备会话」标记块（设备接入时幂等写入；
   codex 只读这个文件，不读 `~/.agents/AGENTS.md`）
-  —— 让 codex 一眼知道：有 `DEVICE_ONBOARD_ID` 就是设备会话、设备目录在 `~/<设备名>`，
-  没有就是普通服务器会话，别瞎猜。
+  —— 让 codex 一眼知道：有 `DEVICE_ONBOARD_ID` 就是设备会话，没有就是普通服务器会话，别瞎猜。
 - **回连入口**：`~/.ssh/config` 里的 `Host onboard-device-<设备名>`
   （`127.0.0.1:<REVERSE_PORT>`）。
-- **项目锚点目录**：`~/<设备名>`（普通目录；设备文件用 `ssh onboard-device-<设备名>` / `scp` 读写）。
 - 于是服务器上的 harness 可以：读档案知道自己在谁的会话里、用
-  `ssh onboard-device-<设备名> '<命令>'` 直接操作设备、在 `~/<设备名>` 这个项目锚点里干活（设备文件经 ssh/scp 读写）。
+  `ssh onboard-device-<设备名> '<命令>'` 直接操作设备（设备文件经 ssh/scp 读写）。
 
 ---
 
@@ -237,9 +217,7 @@ flowchart LR
 |---|---|---|
 | 首次接入 | 设备 | `sh install.sh` |
 | 只开隧道 | 设备 | `device-tunnel` |
-| 一键干活（跟随当前目录） | 设备 | `device-harness` |
-| 一键干活（落在设备锚点目录 `~/<设备名>`） | 设备 | `device-harness --no-map` |
-| 一键干活（指定服务器目录） | 设备 | `device-harness -C '~/xiaomi/项目'` |
+| 一键干活（默认服务器家目录） | 设备 | `device-harness` |
+| 一键干活（指定服务器目录） | 设备 | `device-harness -C '~/项目'` |
 | 进服务器 | 设备 | `ssh onboard-server-<设备名>` |
 | 从服务器操作设备 | 服务器 | `ssh onboard-device-<设备名> '<命令>'` |
-| 工作目录在设备锚点目录 | 服务器 | `codex -C ~/<设备名>` |

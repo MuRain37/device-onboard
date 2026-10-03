@@ -19,11 +19,9 @@ fi
 : "${DEVICE_HOST_ALIAS:?配置缺少 DEVICE_HOST_ALIAS}"
 
 # 选项：
-#   -C <目录>   指定服务器上的工作目录
-#   --no-map    不跟随本机目录，harness 落在设备锚点目录 ~/<设备ID>（不想要的自动映射可以关掉）
+#   -C <目录>   指定服务器上的工作目录（优先级最高）
 # 之后第一个参数是 harness 命令，剩余参数原样传给它。
 DIR=
-NO_MAP=0
 while [ "$#" -gt 0 ]; do
     case "$1" in
         -C)
@@ -34,48 +32,16 @@ while [ "$#" -gt 0 ]; do
             DIR=$2
             shift 2
             ;;
-        --no-map)
-            NO_MAP=1
-            shift
-            ;;
         *)
             break
             ;;
     esac
 done
 
-# 没给 -C 时，按设备侧当前目录自动映射到服务器锚点目录：
-#   设备 $HOME  ↔  服务器 ~/<设备ID>
-# 这样 cd ~/项目 && device-harness 一条命令就够，不用手写 -C，也不用自己换算。
-# 身份靠位置：设备名编码在路径里。所以任何没给 -C 的落点都在 ~/<设备ID>，
-# 绝不落到共享的 $HOME —— 否则「本次会话来自哪台设备」这个信息就丢了。
-# 显式 -C 优先级最高；--no-map 放弃跟随本机目录，但同样落在锚点目录。
-if [ -z "$DIR" ]; then
-    if [ "$NO_MAP" = 1 ]; then
-        # 不跟随本机目录，直接用锚点目录根。
-        DIR="\$HOME/$DEVICE_ID"
-    else
-        _dev_home=$HOME
-        # 去掉家目录末尾的斜杠，免得拼出 //。
-        case "$_dev_home" in
-            */) _dev_home=${_dev_home%/} ;;
-        esac
-        case "$PWD" in
-            "$_dev_home")
-                DIR="\$HOME/$DEVICE_ID"
-                ;;
-            "$_dev_home"/*)
-                # 只做精确前缀切片：用 "$_dev_home"/* 限定，避免 /home/ab 误伤 /home/abc；
-                # 整体加引号，路径含空格也撑得住。
-                DIR="\$HOME/$DEVICE_ID${PWD#"$_dev_home"}"
-                ;;
-            *)
-                DIR="\$HOME/$DEVICE_ID"
-                printf '提示：当前目录 %s 不在设备家目录（%s）下，映射不到服务器锚点目录，改用锚点目录 ~/%s。\n' "$PWD" "$_dev_home" "$DEVICE_ID" >&2
-                ;;
-        esac
-    fi
-fi
+# 没给 -C 时，默认落在服务器家目录。设备身份不靠工作目录表示 ——
+# 本次会话来自哪台设备，由 ssh 带过去的 DEVICE_ONBOARD_ID /
+# DEVICE_ONBOARD_DEVICE_ALIAS 环境变量传递（见文件末尾）。
+[ -n "$DIR" ] || DIR='$HOME'
 
 # 目录是「服务器上」的路径。~ 要留给服务器展开：
 # 如果写成 ~/phone，手机上那个 shell 会先把它展开成手机的路径（错），
@@ -85,18 +51,6 @@ case "$DIR" in
     '~')    DIR='$HOME' ;;
     '~/'*)  DIR="\$HOME/${DIR#\~/}" ;;
 esac
-
-# 依据 DIR 生成实际发给服务器的命令。
-build_run_cmd() {
-    if [ -n "$DIR" ]; then
-        case "$HARNESS_CMD" in
-            codex*) RUN_CMD="$HARNESS_CMD -C \"$DIR\"" ;;
-            *)      RUN_CMD="cd \"$DIR\" && $HARNESS_CMD" ;;
-        esac
-    else
-        RUN_CMD="$HARNESS_CMD"
-    fi
-}
 
 HARNESS_CMD=codex
 if [ "$#" -gt 0 ]; then
@@ -114,12 +68,13 @@ case "$HARNESS_CMD" in
 esac
 
 # codex 用它自己的 -C 指定工作目录；别的命令就 cd 过去再跑。
-if [ -n "$DIR" ]; then
-    # 用双引号：这样 $DIR 里若是 $HOME，交给远端 shell 去展开。
-    build_run_cmd
-    [ "$#" -gt 0 ] && RUN_CMD="$RUN_CMD $*"
-else
-    RUN_CMD="$HARNESS_CMD $*"
+# 用双引号：这样 $DIR 里若是 $HOME，交给远端 shell 去展开。
+case "$HARNESS_CMD" in
+    codex*) RUN_CMD="$HARNESS_CMD -C \"$DIR\"" ;;
+    *)      RUN_CMD="cd \"$DIR\" && $HARNESS_CMD" ;;
+esac
+if [ "$#" -gt 0 ]; then
+    RUN_CMD="$RUN_CMD $*"
 fi
 
 # device-tunnel 正常装在 PATH 里；找不到就退回脚本自己所在的目录。

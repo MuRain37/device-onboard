@@ -223,9 +223,6 @@ grep -q 'DEVICE-ONBOARD-E2E-OK' "$TMP_HOME/full.log"
 [ -f "$TMP_HOME/p9/config" ] || { printf '状态文件没写出来\n' >&2; exit 1; }
 grep -q 'Host onboard-tunnel-xiaomitest' "$TMP_HOME/.ssh/config" || { printf '反向隧道 Host 没写进配置\n' >&2; exit 1; }
 
-# 接入时要在服务器上把项目锚点目录 ~/<设备名> 建好（普通目录，作为设备身份锚点）
-[ -d "$TMP_HOME/xiaomitest" ] || { printf '首次接入没有创建项目锚点目录 ~/<设备ID>\n' >&2; exit 1; }
-
 # 生成的配置必须能被真 ssh 解析 —— 昨晚就是这条把整台设备弄瘸的
 if ! ssh -F "$TMP_HOME/.ssh/config" -G onboard-tunnel-xiaomitest >/dev/null 2>&1; then
     printf '生成的 ~/.ssh/config 解析不过：\n' >&2
@@ -254,7 +251,13 @@ grep -q '<!-- DEVICE-ONBOARD-AGENTS BEGIN -->' "$AGENTS_MD" || { printf 'AGENTS.
 grep -q '<!-- DEVICE-ONBOARD-AGENTS END -->' "$AGENTS_MD" || { printf 'AGENTS.md 缺少结束标记\n' >&2; exit 1; }
 grep -q '## 设备会话' "$AGENTS_MD" || { printf 'AGENTS.md 缺少块标题\n' >&2; exit 1; }
 grep -q 'DEVICE_ONBOARD_ID' "$AGENTS_MD" || { printf 'AGENTS.md 没说明看 DEVICE_ONBOARD_ID\n' >&2; exit 1; }
+grep -q '有值就是它' "$AGENTS_MD" || { printf 'AGENTS.md 没按新文案说明 DEVICE_ONBOARD_ID\n' >&2; exit 1; }
 grep -q '~/.codex/skills/device-onboard/SKILL.md' "$AGENTS_MD" || { printf 'AGENTS.md 没指向设备档案\n' >&2; exit 1; }
+if grep -q '设备目录是' "$AGENTS_MD"; then
+    printf 'AGENTS.md 仍保留旧的「设备目录」表述（身份不该靠工作目录）\n' >&2
+    sed 's/^/  /' "$AGENTS_MD" >&2
+    exit 1
+fi
 
 # 二次运行：块整体替换、不重复累加；块外内容原样保留
 printf '这行不在块里，必须原样保留。\n' >> "$AGENTS_MD"
@@ -310,6 +313,11 @@ grep -q -- '-C "/somewhere"' "$TMP_HOME/hh.log" || {
     sed 's/^/  /' "$TMP_HOME/hh.log" >&2
     exit 1
 }
+grep -q "DEVICE_ONBOARD_ID='xiaomitest'" "$TMP_HOME/hh.log" || {
+    printf '没把 DEVICE_ONBOARD_ID 传给 harness\n' >&2
+    sed 's/^/  /' "$TMP_HOME/hh.log" >&2
+    exit 1
+}
 grep -q "DEVICE_ONBOARD_DEVICE_ALIAS='onboard-device-xiaomitest'" "$TMP_HOME/hh.log" || {
     printf '没把设备身份传给 harness\n' >&2
     sed 's/^/  /' "$TMP_HOME/hh.log" >&2
@@ -317,75 +325,38 @@ grep -q "DEVICE_ONBOARD_DEVICE_ALIAS='onboard-device-xiaomitest'" "$TMP_HOME/hh.
 }
 grep -q '已收起' "$TMP_HOME/hh.out" || { printf '退出时没收隧道：\n'; sed 's/^/  /' "$TMP_HOME/hh.out" >&2; exit 1; }
 
-# --- 不带 -C：按设备侧 $PWD 自动映射到服务器锚点目录（设备 $HOME ↔ 服务器 ~/<设备ID>）---
-# 从 log 里看 codex 实际拿到的 -C。
+# --- 不带 -C：默认落在服务器家目录（身份改由 DEVICE_ONBOARD_ID 传递，不靠工作目录）---
 
-auto_case() {
-    _an=$1
-    _acwd=$2
-    shift 2
-    : > "$TMP_HOME/auto-$_an.log"
-    ( cd "$_acwd" && env FAKE_SSH_LOG="$TMP_HOME/auto-$_an.log" TERMUX_VERSION=0.118 \
-        PATH="$TMP_HOME/b9:$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
-        DEVICE_ONBOARD_CONFIG_FILE="$TMP_HOME/p9/config" \
-        sh "$TMP_HOME/b9/device-harness" "$@" ) > "$TMP_HOME/auto-$_an.out" 2>&1 || true
-}
-
-# ① PWD 在 $HOME 下 → 换算成服务器侧 ~/<设备ID>/<相对路径>
-mkdir -p "$TMP_HOME/proj-a/sub"
-auto_case under "$TMP_HOME/proj-a/sub" codex
-grep -qF -- '-C "$HOME/xiaomitest/proj-a/sub"' "$TMP_HOME/auto-under.log" || {
-    printf '未按 $PWD 自动映射到服务器锚点目录：\n' >&2
-    sed 's/^/  /' "$TMP_HOME/auto-under.log" >&2
+: > "$TMP_HOME/def.log"
+env FAKE_SSH_LOG="$TMP_HOME/def.log" TERMUX_VERSION=0.118 \
+    PATH="$TMP_HOME/b9:$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
+    DEVICE_ONBOARD_CONFIG_FILE="$TMP_HOME/p9/config" \
+    sh "$TMP_HOME/b9/device-harness" codex > "$TMP_HOME/def.out" 2>&1 || true
+grep -qF -- '-C "$HOME"' "$TMP_HOME/def.log" || {
+    printf '不给 -C 时没有默认落在服务器家目录：\n' >&2
+    sed 's/^/  /' "$TMP_HOME/def.log" >&2
     exit 1
 }
-
-# ①b PWD == HOME → 对应锚点目录根
-auto_case at-home "$TMP_HOME" codex
-grep -qF -- '-C "$HOME/xiaomitest"' "$TMP_HOME/auto-at-home.log" || {
-    printf '$PWD 等于家目录时没映射到锚点目录根：\n' >&2
-    sed 's/^/  /' "$TMP_HOME/auto-at-home.log" >&2
-    exit 1
-}
-
-# ①c 路径含空格也要撑住
-mkdir -p "$TMP_HOME/proj space/sub"
-auto_case space "$TMP_HOME/proj space/sub" codex
-grep -qF -- '-C "$HOME/xiaomitest/proj space/sub"' "$TMP_HOME/auto-space.log" || {
-    printf '带空格的路径没被正确映射：\n' >&2
-    sed 's/^/  /' "$TMP_HOME/auto-space.log" >&2
-    exit 1
-}
-
-# ② PWD 不在 $HOME 下 → 退回设备锚点目录 ~/<设备ID>，并说明原因
-# （身份靠位置：落在共享的 $HOME 会丢掉「本次会话来自哪台设备」）
-OUTSIDE=$(mktemp -d)
-auto_case outside "$OUTSIDE" codex
-rm -rf "$OUTSIDE"
-grep -qF -- '-C "$HOME/xiaomitest"' "$TMP_HOME/auto-outside.log" || {
-    printf '不在家目录下时没退回设备锚点目录：\n' >&2
-    sed 's/^/  /' "$TMP_HOME/auto-outside.log" >&2
-    exit 1
-}
-if grep -qF -- '-C "$HOME"' "$TMP_HOME/auto-outside.log"; then
-    printf '不在家目录下时退回了服务器家目录（身份丢失）\n' >&2
+# 默认落点绝不能再带设备名目录（身份不该靠工作目录表示）
+if grep -qF -- '-C "$HOME/xiaomitest"' "$TMP_HOME/def.log"; then
+    printf '默认落点仍带设备目录（身份不该靠工作目录）：\n' >&2
+    sed 's/^/  /' "$TMP_HOME/def.log" >&2
     exit 1
 fi
-grep -q '不在设备家目录' "$TMP_HOME/auto-outside.out" || {
-    printf '不在家目录下时没有给出提示：\n' >&2
-    sed 's/^/  /' "$TMP_HOME/auto-outside.out" >&2
-    exit 1
-}
 
-# ③ 显式 -C 优先，压过自动映射
-auto_case explicit "$TMP_HOME/proj-a" -C /explicit codex
-grep -qF -- '-C "/explicit"' "$TMP_HOME/auto-explicit.log" || {
+# 显式 -C 优先，压过默认家目录
+: > "$TMP_HOME/explicit.log"
+env FAKE_SSH_LOG="$TMP_HOME/explicit.log" TERMUX_VERSION=0.118 \
+    PATH="$TMP_HOME/b9:$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
+    DEVICE_ONBOARD_CONFIG_FILE="$TMP_HOME/p9/config" \
+    sh "$TMP_HOME/b9/device-harness" -C /explicit codex > "$TMP_HOME/explicit.out" 2>&1 || true
+grep -qF -- '-C "/explicit"' "$TMP_HOME/explicit.log" || {
     printf '显式 -C 没有优先：\n' >&2
-    sed 's/^/  /' "$TMP_HOME/auto-explicit.log" >&2
+    sed 's/^/  /' "$TMP_HOME/explicit.log" >&2
     exit 1
 }
-if grep -qF 'xiaomitest/proj-a' "$TMP_HOME/auto-explicit.log"; then
-    printf '显式 -C 被自动映射覆盖了\n' >&2
+if grep -qF -- '-C "$HOME"' "$TMP_HOME/explicit.log"; then
+    printf '显式 -C 被默认家目录覆盖了\n' >&2
     exit 1
 fi
 
@@ -488,35 +459,5 @@ grep -q -- '-C "$HOME/phone"' "$TMP_HOME/hh2.log" || {
     sed 's/^/  /' "$TMP_HOME/hh2.log" >&2
     exit 1
 }
-
-# --no-map：不跟随本机目录，但仍落在设备锚点目录（身份靠位置）
-cat > "$FAKE_BIN/ssh" <<'EOF'
-#!/bin/sh
-printf '%s\n' "$*" >> "$FAKE_SSH_LOG"
-case "$*" in
-    *反向隧道已建立*) printf '✅ 反向隧道已建立\n'; exec sleep 30 ;;
-esac
-exit 0
-EOF
-chmod 755 "$FAKE_BIN/ssh"
-: > "$TMP_HOME/hh3.log"
-env FAKE_SSH_LOG="$TMP_HOME/hh3.log" TERMUX_VERSION=0.118 \
-    PATH="$TMP_HOME/b9:$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
-    DEVICE_ONBOARD_CONFIG_FILE="$TMP_HOME/p9/config" \
-    sh "$TMP_HOME/b9/device-harness" --no-map codex > "$TMP_HOME/hh3.out" 2>&1 || true
-
-grep -q 'codex --no-daemon' "$TMP_HOME/hh3.log" || {
-    printf '--no-map 时没正常启动 codex\n' >&2; sed 's/^/  /' "$TMP_HOME/hh3.log" >&2; exit 1
-}
-grep -qF -- '-C "$HOME/xiaomitest"' "$TMP_HOME/hh3.log" || {
-    printf '--no-map 没把工作目录落在设备锚点目录：\n' >&2
-    sed 's/^/  /' "$TMP_HOME/hh3.log" >&2
-    exit 1
-}
-if grep -qF -- '-C "$HOME"' "$TMP_HOME/hh3.log"; then
-    printf '--no-map 落在了服务器家目录（身份丢失）\n' >&2
-    sed 's/^/  /' "$TMP_HOME/hh3.log" >&2
-    exit 1
-fi
 
 printf 'smoke tests passed\n'

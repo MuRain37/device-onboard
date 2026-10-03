@@ -504,27 +504,6 @@ EOF
 
 printf '%s\n' "$remote_block" | server_ssh "set -eu; file=\"\$HOME/.ssh/config\"; tmp=\"\$(mktemp)\"; mkdir -p \"\$HOME/.ssh\"; if [ -f \"\$file\" ]; then awk -v begin='$remote_begin' -v end='$remote_end' '\$0 == begin {skip=1; next} \$0 == end {skip=0; next} !skip {print}' \"\$file\" > \"\$tmp\"; cp \"\$file\" \"\$file.device-onboard.bak\"; else : > \"\$tmp\"; fi; cat >> \"\$tmp\"; mv \"\$tmp\" \"\$file\"; chmod 600 \"\$file\""
 
-# ---------- 服务器端项目锚点目录（~/<device_id>；任何一步失败都不影响接入） ----------
-# 这台设备在服务器上的身份靠目录位置：~/<device_id>。它现在就是一个普通目录，
-# 作为项目的锚点，也是服务器上 harness 的默认工作目录；设备里的文件用
-# ssh onboard-device-<设备名> / scp 读写，不再走挂载。这里只保证目录存在、权限 755。
-setup_server_device_dir() {
-    _dir_script=$(cat <<REMOTE_DIR_EOF
-set +e
-mp="\$HOME/$device_id"
-mkdir -p "\$mp" 2>/dev/null && chmod 755 "\$mp" 2>/dev/null || { echo DEVICE_DIR_FAIL; exit 0; }
-echo DEVICE_DIR_OK
-REMOTE_DIR_EOF
-)
-    _dir_out=$(printf '%s\n' "$_dir_script" | server_ssh 'sh -s' 2>&1 || true)
-    case "$_dir_out" in
-        *DEVICE_DIR_OK*) printf '✅ 服务器项目锚点目录已就绪（~/%s）。\n' "$device_id" ;;
-        *)               printf '警告：服务器上创建项目锚点目录 ~/%s 失败，跳过（不影响接入）。\n' "$device_id" >&2 ;;
-    esac
-    return 0
-}
-setup_server_device_dir || true
-
 # ---------- 服务器端 ~/.codex/AGENTS.md（可选；任何一步失败都不影响接入） ----------
 # Codex 只读 ~/.codex/AGENTS.md（实测：它不读 ~/.agents/AGENTS.md），所以设备会话说明
 # 必须写在这里，且用独立标记块维护：块已存在就整体替换，不存在就追加，文件不存在就创建。
@@ -547,8 +526,8 @@ cat >> "$tmp" <<'AGENTS_BLOCK_EOF'
 <!-- DEVICE-ONBOARD-AGENTS BEGIN -->
 ## 设备会话
 本服务器的设备登记见 ~/.codex/skills/device-onboard/SKILL.md。
-判断本次会话来自哪台设备：看环境变量 DEVICE_ONBOARD_ID；有值时设备目录是 ~/<设备名>。
-该目录是这台设备的项目锚点；设备上的文件用 `ssh onboard-device-<设备名>` / `scp` 读写。
+判断本次会话来自哪台设备：看环境变量 DEVICE_ONBOARD_ID（有值就是它）。
+设备上的文件用 `ssh onboard-device-<设备名>` / `scp` 读写。
 没有值 → 这是普通服务器会话，不要假设来自设备。
 <!-- DEVICE-ONBOARD-AGENTS END -->
 AGENTS_BLOCK_EOF
@@ -649,5 +628,4 @@ printf '\n✅ 设备接入完成。\n'
 printf '普通服务器：ssh %s\n' "$server_alias"
 printf '一键（隧道 + harness）：device-harness\n'
 printf '反向隧道：device-tunnel\n'
-printf '服务器项目锚点：~/<设备ID>\n'
 printf '在服务器上跑 Harness：ssh %s codex\n' "$server_alias"
