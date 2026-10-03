@@ -554,7 +554,6 @@ device_ssh_port: $device_port
 reverse_port: $reverse_port
 device_key_name: $device_id-device
 server_key_name: $device_id-server
-device_dir: ~/$device_id
 $skill_end
 EOF
 )
