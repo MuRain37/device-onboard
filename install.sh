@@ -232,7 +232,7 @@ ak="\$HOME/.ssh/authorized_keys"
 if [ -f "\$ak" ] && grep -qF "device-onboard:$device_id" "\$ak" 2>/dev/null; then
     grep -vF "device-onboard:$device_id" "\$ak" > "\$ak.rollback" && mv "\$ak.rollback" "\$ak" && chmod 600 "\$ak" 2>/dev/null && echo REMOVED_AUTHORIZED_KEY
 fi
-skill="\$HOME/.agents/skills/device-onboard/SKILL.md"
+skill="\$HOME/.codex/skills/device-onboard/SKILL.md"
 if [ "$SKILL_WAS_NEW" = 1 ]; then
     if [ -f "\$skill" ]; then rm -f "\$skill" && echo REMOVED_SKILL_FILE; fi
 elif [ -f "\$skill" ] && grep -qF "<!-- DEVICE-ONBOARD:$device_id BEGIN -->" "\$skill" 2>/dev/null; then
@@ -613,7 +613,7 @@ $conv_begin
 $conv_end
 EOF
 )
-skill_dir_remote='$HOME/.agents/skills/device-onboard'
+skill_dir_remote='$HOME/.codex/skills/device-onboard'
 skill_file_remote="$skill_dir_remote/SKILL.md"
 
 if server_ssh "test -f \"$skill_file_remote\"" 2>/dev/null; then

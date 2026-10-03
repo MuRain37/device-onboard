@@ -20,7 +20,7 @@
 - 设备密钥目录：`~/.ssh/device-onboard/`
 - 设备 SSH 配置：`~/.ssh/config`
 - 服务器 SSH 配置：`~/.ssh/config`
-- 唯一 skill：`~/.agents/skills/device-onboard/SKILL.md`
+- 唯一 skill：`~/.codex/skills/device-onboard/SKILL.md`
 
 设备侧生成普通服务器连接和反向隧道两个 Host。服务器侧生成一个通过反向隧道回连设备的 Host。Harness 由菜单通过普通服务器 Host 执行远程命令启动，不为每个 Harness 单独生成 SSH Host。
 
@@ -133,7 +133,7 @@ ssh onboard-server-<设备名>
 
 ### 6. 写入配置并验证
 
-脚本备份已有配置，只更新 `~/.ssh/config` 中自己标记的区块，并写入服务器的 `~/.agents/skills/device-onboard/SKILL.md` 设备记录。主机名已存在且身份不匹配时停止，不覆盖。
+脚本备份已有配置，只更新 `~/.ssh/config` 中自己标记的区块，并写入服务器的 `~/.codex/skills/device-onboard/SKILL.md` 设备记录。主机名已存在且身份不匹配时停止，不覆盖。
 
 然后接入程序启动临时反向隧道，自动验证设备到服务器和服务器到设备的连接，验证后关闭临时隧道。两项都成功后显示结果和日常使用命令。这个临时隧道只用于首次配置，不会常驻。
 

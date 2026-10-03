@@ -34,7 +34,7 @@ flowchart LR
 
     subgraph SRV["服务器（Ubuntu）"]
         SSH["sshd"]
-        ARCH["设备档案<br/>~/.agents/skills/device-onboard/SKILL.md"]
+        ARCH["设备档案<br/>~/.codex/skills/device-onboard/SKILL.md"]
         MP["挂载点<br/>~/&lt;设备名&gt;"]
         RUN["harness（codex）<br/>工作目录可指向设备文件夹"]
         REPO["~/.ssh/config<br/>Host onboard-device-&lt;设备名&gt;"]
@@ -72,7 +72,7 @@ sequenceDiagram
     D->>D: 写进设备 authorized_keys
     D->>D: 写设备侧 ~/.ssh/config<br/>Host onboard-server-&lt;设备名&gt;
     S->>S: 写服务器侧 ~/.ssh/config<br/>Host onboard-device-&lt;设备名&gt;（含 RemoteForward）
-    D->>S: 建设备档案到 ~/.agents/skills/device-onboard/
+    D->>S: 建设备档案到 ~/.codex/skills/device-onboard/
     D->>S: 反向通道真握手验证
     Note over D,S: 让服务器在探测端口上主动连回设备一次<br/>必须回显 DEVICE-ONBOARD-E2E-OK 才算通
     D->>S: 配置服务器端 sshfs
@@ -242,7 +242,7 @@ flowchart TD
 
 ## 9. 服务器侧看到什么
 
-- **设备档案**：`~/.agents/skills/device-onboard/SKILL.md`
+- **设备档案**：`~/.codex/skills/device-onboard/SKILL.md`
   —— 一个 skill 记所有设备，每台一个块；还有一个放在所有设备块之外的
   **共享约定块**，说明"本次会话来自哪台设备"以环境变量形式传进来
   （`DEVICE_ONBOARD_ID`、`DEVICE_ONBOARD_DEVICE_ALIAS`）。
