@@ -599,6 +599,7 @@ cat >> "$tmp" <<'AGENTS_BLOCK_EOF'
 ## 设备会话
 本服务器的设备登记见 ~/.codex/skills/device-onboard/SKILL.md。
 判断本次会话来自哪台设备：看环境变量 DEVICE_ONBOARD_ID；有值时设备目录在 ~/<设备名>。
+该目录是这台设备的项目锚点（不一定挂着 sshfs）；设备上的文件用 `ssh onboard-device-<设备名>` / `scp` 读写。
 没有值 → 这是普通服务器会话，不要假设来自设备。
 <!-- DEVICE-ONBOARD-AGENTS END -->
 AGENTS_BLOCK_EOF
