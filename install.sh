@@ -571,6 +571,9 @@ cat >> "$tmp" <<'AGENTS_BLOCK_EOF'
 ## 设备会话
 本服务器的设备登记见 ~/.codex/skills/device-onboard/SKILL.md。
 判断本次会话来自哪台设备：看环境变量 DEVICE_ONBOARD_ID（有值就是它）。
+DEVICE_ONBOARD_DEVICE_CWD 是发起设备上用户当时的目录，DEVICE_ONBOARD_DEVICE_CWD_REL 是它
+相对该设备家目录的形式（`.` = 家目录本身，空 = 在家目录之外）—— 这两个只是「用户当时在哪」
+的线索，路径只在那台设备上有效，不要在这台服务器上 cd 它。
 设备上的文件用 `ssh onboard-device-<设备名>` / `scp` 读写。
 没有值 → 这是普通服务器会话，不要假设来自设备。
 <!-- DEVICE-ONBOARD-AGENTS END -->
@@ -609,16 +612,23 @@ conv_block=$(cat <<EOF
 $conv_begin
 ## 本次会话来自哪台设备
 
-如果本次会话是被 \`device-harness\` 拉起来的，环境里带着两个变量：
+如果本次会话是被 \`device-harness\` 拉起来的，环境里带着这些变量：
 
     DEVICE_ONBOARD_ID=<设备名>                        例如 xiaomi
     DEVICE_ONBOARD_DEVICE_ALIAS=onboard-device-<设备名>
+    DEVICE_ONBOARD_DEVICE_CWD=<设备上当时的绝对路径>   例如 /Users/mac/workspace
+    DEVICE_ONBOARD_DEVICE_CWD_REL=<相对设备家目录>     例如 workspace；"." = 家目录本身；空 = 家目录之外
 
 也就是说：这台服务器对面的那一侧，就是发起本次会话的那台设备。可以直接回去：
 
     ssh "\$DEVICE_ONBOARD_DEVICE_ALIAS"
 
-没有这两个变量，说明本次会话不是从设备侧（device-harness）进来的，例如手动 ssh 上来。
+DEVICE_ONBOARD_DEVICE_CWD 只是「用户当时站在哪」这条线索，**它是那台设备上的路径，
+这台服务器上并不存在** —— 不要在这里 cd 它。要读那儿的文件，把那个路径带过去：
+
+    ssh "\$DEVICE_ONBOARD_DEVICE_ALIAS" "cd <DEVICE_ONBOARD_DEVICE_CWD 的值> && ls"
+
+没有这些变量，说明本次会话不是从设备侧（device-harness）进来的，例如手动 ssh 上来。
 $conv_end
 EOF
 )

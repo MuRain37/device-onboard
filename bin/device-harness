@@ -77,6 +77,26 @@ if [ "$#" -gt 0 ]; then
     RUN_CMD="$RUN_CMD $*"
 fi
 
+# ---------- 设备侧当前目录：作为「上下文」带给服务器上的 harness ----------
+# 注意定位：这是「用户当时站在哪」，是上下文，**不是身份**。身份仍只有
+# DEVICE_ONBOARD_ID 一个 —— 目录可以随处 cd，身份不行。
+#
+# 用它的是谁：服务器上的 agent。它想知道「要去哪台设备的哪个目录看文件」时，
+# 不必再猜一轮。绝对路径给「过去操作」用；相对家目录的短名给人看、给将来取名用。
+#
+# 必须单引号转义后再拼进远端命令行：目录名可能带空格或引号（macOS 上很常见），
+# 不转义就是一个能在服务器上注入命令的口子。
+squote() {
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+DEVICE_CWD=$(pwd -P 2>/dev/null || pwd)
+case "$DEVICE_CWD" in
+    "$HOME")   DEVICE_CWD_REL='.' ;;          # 就在家目录
+    "$HOME"/*) DEVICE_CWD_REL=${DEVICE_CWD#"$HOME"/} ;;
+    *)         DEVICE_CWD_REL='' ;;           # 在家目录之外（空值有明确含义）
+esac
+
 # device-tunnel 正常装在 PATH 里；找不到就退回脚本自己所在的目录。
 TUNNEL_BIN=$(command -v device-tunnel 2>/dev/null || true)
 [ -n "$TUNNEL_BIN" ] || TUNNEL_BIN=$(dirname "$0")/device-tunnel
@@ -131,7 +151,8 @@ fi
 
 printf '隧道就绪。在服务器上启动 %s（退出后隧道自动收起）…\n\n' "$HARNESS_CMD"
 
-# 把「本次会话来自哪台设备」交给 harness。变量名和用法写在服务器上那份设备档案里，
-# 而档案的 description 在会话一开始就可见 —— 所以 harness 知道该来查这两个变量。
-ssh -t "$SERVER_HOST_ALIAS" \
-    "DEVICE_ONBOARD_ID='$DEVICE_ID' DEVICE_ONBOARD_DEVICE_ALIAS='$DEVICE_HOST_ALIAS' $RUN_CMD"
+# 把「本次会话来自哪台设备」和「设备侧当时在哪个目录」交给 harness。变量名和用法写在
+# 服务器上那份设备档案 + ~/.codex/AGENTS.md 里 —— 会话一开始就能看到。
+# 设备 ID / 别名来自配置（install 已限定字符集），但目录是任意内容，一律 squote 转义。
+ENV_PREFIX="DEVICE_ONBOARD_ID=$(squote "$DEVICE_ID") DEVICE_ONBOARD_DEVICE_ALIAS=$(squote "$DEVICE_HOST_ALIAS") DEVICE_ONBOARD_DEVICE_CWD=$(squote "$DEVICE_CWD") DEVICE_ONBOARD_DEVICE_CWD_REL=$(squote "$DEVICE_CWD_REL")"
+ssh -t "$SERVER_HOST_ALIAS" "$ENV_PREFIX $RUN_CMD"

@@ -538,4 +538,87 @@ grep -q 'Port 2230' "$TMP_HOME/x11/server-block" || {
     exit 1
 }
 
+# --- device-harness 把「设备侧当前目录」带给服务器（上下文，不是身份）---
+# 目录名可能带空格 / 单引号，拼进远端命令行前必须转义 —— 不转义就是注入口子。
+# 这里不只看字符串，而是把 harness 真正拼出来的远端命令行交给真 sh 跑一遍，验回环。
+cat > "$FAKE_BIN/ssh" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_SSH_LOG"
+case "$*" in
+    *反向隧道已建立*) printf '✅ 反向隧道已建立\n'; exec sleep 30 ;;
+esac
+case "$*" in
+    *DEVICE_ONBOARD_ID=*)
+        for a in "$@"; do last=$a; done
+        printf '%s\n' "$last" >> "$FAKE_REMOTE_CMD"
+        exit 0
+        ;;
+esac
+exit 0
+EOF
+chmod 755 "$FAKE_BIN/ssh"
+
+cat > "$FAKE_BIN/codex" <<'EOF'
+#!/bin/sh
+printf 'ID=[%s]\n' "$DEVICE_ONBOARD_ID"
+printf 'ALIAS=[%s]\n' "$DEVICE_ONBOARD_DEVICE_ALIAS"
+printf 'CWD=[%s]\n' "$DEVICE_ONBOARD_DEVICE_CWD"
+printf 'REL=[%s]\n' "$DEVICE_ONBOARD_DEVICE_CWD_REL"
+EOF
+chmod 755 "$FAKE_BIN/codex"
+
+run_harness_in() {
+    _dir=$1
+    _log=$2
+    : > "$_log"
+    ( cd "$_dir" && env FAKE_SSH_LOG="$TMP_HOME/hh3.log" FAKE_REMOTE_CMD="$_log" TERMUX_VERSION=0.118 \
+        PATH="$TMP_HOME/b9:$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
+        DEVICE_ONBOARD_CONFIG_FILE="$TMP_HOME/p9/config" \
+        sh "$TMP_HOME/b9/device-harness" codex >"$TMP_HOME/hh3.out" 2>&1 ) || true
+}
+
+# ① 从一个带空格和单引号的目录里启动
+QDIR="$TMP_HOME/it's a proj"
+mkdir -p "$QDIR"
+run_harness_in "$QDIR" "$TMP_HOME/remote1.log"
+if [ ! -s "$TMP_HOME/remote1.log" ]; then
+    printf 'device-harness 没把远端命令行送出来（ssh 没被调用？）\n' >&2
+    sed 's/^/  /' "$TMP_HOME/hh3.out" >&2
+    exit 1
+fi
+rcmd=$(tail -1 "$TMP_HOME/remote1.log")
+case "$rcmd" in
+    *"it'\\''s a proj"*) ;;
+    *)  printf '目录名没有被单引号转义（注入口子）\n  %s\n' "$rcmd" >&2; exit 1 ;;
+esac
+got=$(PATH="$FAKE_BIN:$PATH" sh -c "$rcmd" 2>&1)
+printf '%s\n' "$got" | grep -qxF "CWD=[$QDIR]" || {
+    printf '设备侧绝对路径没传到 / 回环不一致\n  期望 CWD=[%s]\n  实际:\n%s\n' "$QDIR" "$got" >&2
+    exit 1
+}
+printf '%s\n' "$got" | grep -qxF "REL=[it's a proj]" || {
+    printf '相对家目录的形式不对\n  实际:\n%s\n' "$got" >&2
+    exit 1
+}
+printf '%s\n' "$got" | grep -qxF "ID=[xiaomitest]" || {
+    printf '身份变量丢了这个不该动的东西\n%s\n' "$got" >&2
+    exit 1
+}
+
+# ② 就在家目录里：REL 应为 "."
+run_harness_in "$TMP_HOME" "$TMP_HOME/remote2.log"
+got=$(PATH="$FAKE_BIN:$PATH" sh -c "$(tail -1 "$TMP_HOME/remote2.log")" 2>&1)
+printf '%s\n' "$got" | grep -qxF 'REL=[.]' || {
+    printf '在家目录时 REL 应该是「.」\n%s\n' "$got" >&2
+    exit 1
+}
+
+# ③ 在家目录之外：REL 应为空（空值有明确含义，不能被当成"家目录"）
+run_harness_in / "$TMP_HOME/remote3.log"
+got=$(PATH="$FAKE_BIN:$PATH" sh -c "$(tail -1 "$TMP_HOME/remote3.log")" 2>&1)
+printf '%s\n' "$got" | grep -qxF 'REL=[]' || {
+    printf '在家目录之外时 REL 应该是空\n%s\n' "$got" >&2
+    exit 1
+}
+
 printf 'smoke tests passed\n'
