@@ -382,6 +382,33 @@ fi
 reverse_port_start=${DEVICE_ONBOARD_REVERSE_PORT_START:-2230}
 reverse_port_end=${DEVICE_ONBOARD_REVERSE_PORT_END:-2299}
 
+# 反向端口必须「按设备固定」，不能「谁先来谁拿」。
+# 因为在服务器眼里，每台设备是一个 [127.0.0.1]:<端口> 的 ssh 主机，而 known_hosts 的键
+# 里带着端口。两台设备先后用同一个端口，后到的那台就会被旧指纹挡住：
+#     Host key verification failed（WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED）
+# 试探「端口是否空闲」只能反映安装那一刻谁在听 —— 所以先读服务器档案：
+#   本设备登记过的端口 → 优先复用（指纹长期有效）
+#   别的设备登记过的端口 → 直接跳过（哪怕现在没人连着）
+skill_file_remote='$HOME/.codex/skills/device-onboard/SKILL.md'
+archive_dump=$(server_ssh "cat \"$skill_file_remote\" 2>/dev/null" 2>/dev/null || true)
+
+own_registered_port=$(printf '%s\n' "$archive_dump" | awk -v id="$device_id" '
+    $0 == "<!-- DEVICE-ONBOARD:" id " BEGIN -->" { in_own = 1; next }
+    $0 == "<!-- DEVICE-ONBOARD:" id " END -->"   { in_own = 0; next }
+    in_own && $1 == "reverse_port:" && $2 ~ /^[0-9]+$/ { print $2; exit }')
+
+registered_ports=$(printf '%s\n' "$archive_dump" | awk -v id="$device_id" '
+    /^<!-- DEVICE-ONBOARD:.* BEGIN -->$/ { cur = $2; sub(/^DEVICE-ONBOARD:/, "", cur); in_block = 1; next }
+    /^<!-- DEVICE-ONBOARD:.* END -->$/   { in_block = 0; next }
+    in_block && $1 == "reverse_port:" && $2 ~ /^[0-9]+$/ && cur != id { print $2 }' | tr '\n' ' ')
+
+port_registered_to_other_device() {
+    case " $registered_ports " in
+        *" $1 "*) return 0 ;;
+        *)        return 1 ;;
+    esac
+}
+
 # 真跑一次「服务器 → 隧道 → 本机」的握手。
 # 端口绑上只说明转发建立成功，不等于通道真的通 —— 所以要真连回来。
 reverse_forward_works() {
@@ -403,7 +430,25 @@ fi
 probe_log="$probe_log_dir/device-onboard-tunnel.$$.log"
 
 port=$reverse_port_start
+# 候选顺序：本设备登记过的端口排最前（复用 → known_hosts 里的指纹一直有效），
+# 其余按区间顺序跟上；已被别的设备登记的端口根本不进候选名单。
+port_candidates=
+if [ -n "$own_registered_port" ]; then
+    port_candidates=$own_registered_port
+fi
 while [ "$port" -le "$reverse_port_end" ]; do
+    case " $port_candidates " in
+        *" $port "*) ;;
+        *) port_candidates="${port_candidates:+$port_candidates }$port" ;;
+    esac
+    port=$((port + 1))
+done
+
+for port in $port_candidates; do
+    if port_registered_to_other_device "$port"; then
+        printf '跳过端口 %s：已登记给其它设备（避免两台设备在服务器上争同一个 [127.0.0.1]:%s 指纹）。\n' "$port" "$port"
+        continue
+    fi
     ssh -i "$device_key" -o IdentitiesOnly=yes -o ExitOnForwardFailure=yes -o ConnectTimeout=8 -p "$server_port" -R "$port:localhost:$device_port" -N "$server_target" >"$probe_log" 2>&1 &
     tunnel_pid=$!
     sleep 1
@@ -421,7 +466,6 @@ while [ "$port" -le "$reverse_port_end" ]; do
     fi
     wait "$tunnel_pid" 2>/dev/null || true
     tunnel_pid=
-    port=$((port + 1))
 done
 if [ -z "$reverse_port" ]; then
     printf '探测隧道时的最后几行报错：\n' >&2

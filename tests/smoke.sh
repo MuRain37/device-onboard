@@ -445,6 +445,20 @@ esac
 case "$*" in
     *-R*localhost*) exec sleep 30 ;;
 esac
+# 服务器档案的读取：装了 FAKE_SKILL_MD 就当作远端档案返回（端口分配要靠它）。
+case "$*" in
+    *cat*device-onboard/SKILL.md*)
+        if [ -n "${FAKE_SKILL_MD:-}" ] && [ -f "$FAKE_SKILL_MD" ]; then cat "$FAKE_SKILL_MD"; fi
+        exit 0
+        ;;
+esac
+# 服务器侧回连块的写入：块是走 stdin 送过去的，把 stdin 落盘才能断言它写了哪个端口。
+case "$*" in
+    *device-onboard:*BEGIN*)
+        if [ -n "${FAKE_SERVER_BLOCK:-}" ]; then cat > "$FAKE_SERVER_BLOCK"; fi
+        exit 0
+        ;;
+esac
 exit 0
 EOF
 chmod 755 "$FAKE_BIN/ssh"
@@ -457,6 +471,70 @@ env FAKE_SSH_LOG="$TMP_HOME/hh2.log" TERMUX_VERSION=0.118 \
 grep -q -- '-C "$HOME/phone"' "$TMP_HOME/hh2.log" || {
     printf 'device-harness 没有把 ~ 翻译成远端可展开的 $HOME\n' >&2
     sed 's/^/  /' "$TMP_HOME/hh2.log" >&2
+    exit 1
+}
+
+# --- 反向端口按设备固定：避开别人登记的端口 / 复用自己登记的端口 ---
+# 端口是服务器上 [127.0.0.1]:<port> 这个 ssh 主机的身份，known_hosts 的键里带着端口。
+# 两台设备先后用同一个端口，后到的那台会被旧指纹挡住（Host key verification failed）。
+# 所以分配必须看档案登记，而不是"谁先来谁拿"。
+
+PORT_ARCHIVE="$TMP_HOME/port-archive.md"
+cat > "$PORT_ARCHIVE" <<'EOF'
+<!-- DEVICE-ONBOARD-CONVENTION BEGIN -->
+共享约定
+<!-- DEVICE-ONBOARD-CONVENTION END -->
+
+<!-- DEVICE-ONBOARD:xiaomitest BEGIN -->
+device_name: xiaomitest
+reverse_port: 2230
+<!-- DEVICE-ONBOARD:xiaomitest END -->
+EOF
+
+# ① 另一台设备接入：2230 已被 xiaomitest 登记 → 必须拿 2231
+mkdir -p "$TMP_HOME/x10"
+printf '1\nseconddev\n134.175.91.169\nubuntu\n22\n' | env FAKE_SSH_LOG="$TMP_HOME/x10/ssh.log" FAKE_SKILL_MD="$PORT_ARCHIVE" FAKE_SERVER_BLOCK="$TMP_HOME/x10/server-block" TERMUX_VERSION=0.118 PATH="$TMP_HOME/b9:$FAKE_BIN:$PATH" HOME="$TMP_HOME/x10" \
+    DEVICE_ONBOARD_REVERSE_PORT_START=2230 DEVICE_ONBOARD_REVERSE_PORT_END=2231 \
+    DEVICE_ONBOARD_CONFIG_DIR="$TMP_HOME/p10" DEVICE_ONBOARD_KEY_DIR="$TMP_HOME/k10" DEVICE_ONBOARD_BIN_DIR="$TMP_HOME/b10" \
+    sh "$ROOT/install.sh" >"$TMP_HOME/x10/out" 2>&1 || true
+
+grep -q '跳过端口 2230' "$TMP_HOME/x10/out" || {
+    printf '没有跳过已登记给别的设备的端口 2230\n' >&2
+    sed 's/^/  /' "$TMP_HOME/x10/out" >&2
+    exit 1
+}
+grep -q 'REVERSE_PORT=2231' "$TMP_HOME/p10/config" || {
+    printf '另一台设备没有拿到 2231（应避开已登记的 2230）\n' >&2
+    sed 's/^/  /' "$TMP_HOME/p10/config" 2>/dev/null >&2
+    exit 1
+}
+grep -q 'RemoteForward 2231 localhost' "$TMP_HOME/x10/.ssh/config" || {
+    printf '设备侧隧道块没写 2231\n' >&2
+    sed 's/^/  /' "$TMP_HOME/x10/.ssh/config" 2>/dev/null >&2
+    exit 1
+}
+# 服务器侧的 Host 块（onboard-device-*）端口才是会撞 known_hosts 的那个
+grep -q 'Port 2231' "$TMP_HOME/x10/server-block" || {
+    printf '服务器回连块没写 2231\n' >&2
+    sed 's/^/  /' "$TMP_HOME/x10/server-block" 2>/dev/null >&2
+    exit 1
+}
+
+# ② 同一台设备重装：2230 是它自己登记的 → 复用（指纹才不会变），不要贪 2231
+mkdir -p "$TMP_HOME/x11"
+printf '1\nxiaomitest\n134.175.91.169\nubuntu\n22\n' | env FAKE_SSH_LOG="$TMP_HOME/x11/ssh.log" FAKE_SKILL_MD="$PORT_ARCHIVE" FAKE_SERVER_BLOCK="$TMP_HOME/x11/server-block" TERMUX_VERSION=0.118 PATH="$TMP_HOME/b9:$FAKE_BIN:$PATH" HOME="$TMP_HOME/x11" \
+    DEVICE_ONBOARD_REVERSE_PORT_START=2230 DEVICE_ONBOARD_REVERSE_PORT_END=2231 \
+    DEVICE_ONBOARD_CONFIG_DIR="$TMP_HOME/p11" DEVICE_ONBOARD_KEY_DIR="$TMP_HOME/k11" DEVICE_ONBOARD_BIN_DIR="$TMP_HOME/b11" \
+    sh "$ROOT/install.sh" >"$TMP_HOME/x11/out" 2>&1 || true
+
+grep -q 'REVERSE_PORT=2230' "$TMP_HOME/p11/config" || {
+    printf '重装没有复用自己登记的 2230（指纹会因此失效）\n' >&2
+    sed 's/^/  /' "$TMP_HOME/p11/config" 2>/dev/null >&2
+    exit 1
+}
+grep -q 'Port 2230' "$TMP_HOME/x11/server-block" || {
+    printf '重装把服务器回连块的端口改掉了（应仍为 2230）\n' >&2
+    sed 's/^/  /' "$TMP_HOME/x11/server-block" 2>/dev/null >&2
     exit 1
 }
 
