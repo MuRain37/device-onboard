@@ -405,11 +405,25 @@ registered_ports=$(printf '%s\n' "$archive_dump" | awk -v id="$device_id" '
     /^<!-- DEVICE-ONBOARD:.* END -->$/   { in_block = 0; next }
     in_block && $1 == "reverse_port:" && $2 ~ /^[0-9]+$/ && cur != id { print $2 }' | tr '\n' ' ')
 
+# 台账来源之二：服务器 ssh config 里各设备块的 Port。
+# 清掉档案不该等于丢掉端口分配 —— 否则某台「睡着了」（隧道没开）的设备登记过的端口
+# 就没人保护，新设备会把它抢走，之后两台在服务器上争同一个 [127.0.0.1]:<端口> 指纹。
+# 只取「别的设备」的登记：本设备自己的登记以档案为准（config 里那份可能正是上一次
+# 错误分配的遗留，拿它当依据会把错误固化下来）。
+config_ports=$(server_ssh "awk '/^Host onboard-device-/{d=\$2} /^[[:space:]]*Port[[:space:]]/{if(d!=\"\"){sub(/^onboard-device-/,\"\",d); print d\" \"\$2; d=\"\"}}' \"\$HOME/.ssh/config\" 2>/dev/null" 2>/dev/null || true)
+registered_ports="$registered_ports$(printf '%s\n' "$config_ports" | awk -v id="$device_id" '$1 != id && $2 ~ /^[0-9]+$/ { print $2 }' | tr '\n' ' ')"
+
 port_registered_to_other_device() {
     case " $registered_ports " in
         *" $1 "*) return 0 ;;
         *)        return 1 ;;
     esac
+}
+
+# 服务器上这个端口现在有人在听吗？（没有 ss 就当没人听，退回「绑一下试试」。）
+port_in_use_on_server() {
+    _out=$(server_ssh "ss -ltn \"sport = :$1\" 2>/dev/null | tail -n +2" 2>/dev/null || true)
+    [ -n "$_out" ]
 }
 
 # 真跑一次「服务器 → 隧道 → 本机」的握手。
@@ -450,6 +464,19 @@ done
 for port in $port_candidates; do
     if port_registered_to_other_device "$port"; then
         printf '跳过端口 %s：已登记给其它设备（避免两台设备在服务器上争同一个 [127.0.0.1]:%s 指纹）。\n' "$port" "$port"
+        continue
+    fi
+    # 端口上已经有人在听：先问一句「这是不是本设备自己的隧道」。
+    # 是 → 直接复用。重跑安装时本设备的隧道往往还开着，这时去 bind 必然失败
+    #      （端口被自己占着），旧逻辑会一路顺位到别人的端口，既丢身份又可能撞指纹。
+    # 不是 → 让开，那是别人的隧道，不该抢。
+    if port_in_use_on_server "$port"; then
+        if reverse_forward_works "$port"; then
+            reverse_port=$port
+            printf '端口 %s 上已有本设备的隧道在跑，直接复用（不重新绑定）。\n' "$port"
+            break
+        fi
+        printf '跳过端口 %s：已有人在听，且反向握手确认不是本设备。\n' "$port"
         continue
     fi
     ssh -i "$device_key" -o IdentitiesOnly=yes -o ExitOnForwardFailure=yes -o ConnectTimeout=8 -p "$server_port" -R "$port:localhost:$device_port" -N "$server_target" >"$probe_log" 2>&1 &

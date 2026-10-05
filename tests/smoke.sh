@@ -727,4 +727,75 @@ if [ -e "$TMP_HOME/h32/.codex" ] || [ -e "$TMP_HOME/h32/.claude" ]; then
 fi
 grep -q '没探测到' "$TMP_HOME/h32/out" || { printf '没探测到 harness 时没有提示\n' >&2; sed 's/^/  /' "$TMP_HOME/h32/out" >&2; exit 1; }
 
+# --- 端口候选逻辑：自己的隧道要复用，别人的要让开 ---
+# 背景（真机踩过）：清空服务器档案后重跑安装，候选里既没有「本设备登记过的端口」，
+# 也不知道别的设备登记了什么；而本设备隧道还开着 → 2230 被自己占着、bind 必然失败
+# → 顺位拿走 2231（那是 Mac 的）→ 两台设备争同一个 [127.0.0.1]:<端口> 指纹。
+cat > "$FAKE_BIN/ssh" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_SSH_LOG"
+case "$*" in *'sh -s'*) exec sh ;; esac
+case "$*" in *'for c in codex claude'*) printf '%s' "${FAKE_HARNESSES-}" ;; esac
+# 服务器 ~/.ssh/config 里各设备登记的端口
+case "$*" in *'Host onboard-device-'*) printf '%s' "${FAKE_CONFIG_PORTS-}" ;; esac
+# 端口占用探测：FAKE_INUSE_PORTS 里的端口「有人在听」
+case "$*" in
+    *'ss -ltn'*)
+        for p in ${FAKE_INUSE_PORTS-}; do
+            case "$*" in *"sport = :$p"*) printf 'LISTEN 0 128 127.0.0.1:%s 0.0.0.0:*\n' "$p" ;;
+            esac
+        done
+        exit 0 ;;
+esac
+# 反向握手探测（取命令行里最后一个 -p N，那才是被探的端口）
+case "$*" in
+    *DEVICE-ONBOARD-E2E-OK*)
+        _p=$(printf '%s' "$*" | grep -o '\-p [0-9]*' | tail -1 | awk '{print $2}')
+        for p in ${FAKE_E2E_FAIL_PORTS-}; do
+            case "$_p" in "$p") exit 1 ;; esac
+        done
+        printf 'DEVICE-ONBOARD-E2E-OK' ;;
+esac
+case "$*" in *反向隧道已建立*) printf '✅ 反向隧道已建立\n'; exec sleep 30 ;; esac
+# 绑定：端口被人占着时 ssh 会失败（模拟 remote port forwarding failed）
+case "$*" in
+    *-R*localhost*)
+        _p=$(printf '%s' "$*" | grep -o '\-R [0-9]*' | tail -1 | awk '{print $2}')
+        for p in ${FAKE_INUSE_PORTS-}; do
+            case "$_p" in "$p") exit 1 ;; esac
+        done
+        exec sleep 30 ;;
+esac
+exit 0
+EOF
+chmod 755 "$FAKE_BIN/ssh"
+
+run_install_port_case() {
+    _home=$1
+    mkdir -p "$_home"
+    printf '1\nxiaomitest\n134.175.91.169\nubuntu\n22\n' | env FAKE_SSH_LOG="$_home/ssh.log" TERMUX_VERSION=0.118 FAKE_HARNESSES='' \
+        PATH="$FAKE_BIN:$PATH" HOME="$_home" \
+        DEVICE_ONBOARD_CONFIG_DIR="$_home/cfg" DEVICE_ONBOARD_KEY_DIR="$_home/keys" DEVICE_ONBOARD_BIN_DIR="$_home/bin" \
+        sh "$ROOT/install.sh" >"$_home/out" 2>&1 || true
+}
+
+# ① 端口上已有本设备的隧道（握手成功）→ 直接复用，不重新绑定
+FAKE_INUSE_PORTS=2230 run_install_port_case "$TMP_HOME/p30"
+grep -q '^REVERSE_PORT=2230$' "$TMP_HOME/p30/cfg/config" || { printf '① 应复用 2230，实际: %s\n' "$(grep '^REVERSE_PORT=' "$TMP_HOME/p30/cfg/config")" >&2; exit 1; }
+grep -q '已有本设备的隧道在跑' "$TMP_HOME/p30/out" || { printf '① 没有走「复用已有隧道」分支\n' >&2; sed 's/^/  /' "$TMP_HOME/p30/out" >&2; exit 1; }
+if grep -q '\-R 2230:' "$TMP_HOME/p30/ssh.log"; then
+    printf '① 复用了却还去 bind 2230（端口被自己占着，bind 必然失败）\n' >&2
+    exit 1
+fi
+
+# ② 端口上有别人的隧道（占用 + 握手失败）→ 让开，顺位拿 2231
+FAKE_INUSE_PORTS=2230 FAKE_E2E_FAIL_PORTS=2230 run_install_port_case "$TMP_HOME/p31"
+grep -q '^REVERSE_PORT=2231$' "$TMP_HOME/p31/cfg/config" || { printf '② 应让开 2230 拿 2231，实际: %s\n' "$(grep '^REVERSE_PORT=' "$TMP_HOME/p31/cfg/config")" >&2; exit 1; }
+grep -q '确认不是本设备' "$TMP_HOME/p31/out" || { printf '② 没有识别出「别人的隧道」\n' >&2; sed 's/^/  /' "$TMP_HOME/p31/out" >&2; exit 1; }
+
+# ③ 档案被清空，但服务器 config 里仍登记着其它设备的端口 → 照样跳过
+FAKE_CONFIG_PORTS='mac 2230' run_install_port_case "$TMP_HOME/p32"
+grep -q '^REVERSE_PORT=2231$' "$TMP_HOME/p32/cfg/config" || { printf '③ 应跳过 config 里登记给 mac 的 2230，实际: %s\n' "$(grep '^REVERSE_PORT=' "$TMP_HOME/p32/cfg/config")" >&2; exit 1; }
+grep -q '跳过端口 2230：已登记给其它设备' "$TMP_HOME/p32/out" || { printf '③ 没有用 config 台账保护别设备的端口\n' >&2; sed 's/^/  /' "$TMP_HOME/p32/out" >&2; exit 1; }
+
 printf 'smoke tests passed\n'
