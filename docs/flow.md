@@ -34,8 +34,8 @@ flowchart LR
 
     subgraph SRV["服务器（Ubuntu）"]
         SSH["sshd"]
-        ARCH["设备档案<br/>~/.codex/skills/device-onboard/SKILL.md"]
-        AGENTS["全局指令<br/>~/.codex/AGENTS.md 设备会话块"]
+        ARCH["设备档案<br/>~/.codex 或 ~/.claude 的<br/>skills/device-onboard/SKILL.md"]
+        AGENTS["全局指令<br/>~/.codex/AGENTS.md 或 ~/.claude/CLAUDE.md 的会话块"]
         RUN["harness（codex）<br/>工作目录默认在服务器家目录"]
         REPO["~/.ssh/config<br/>Host onboard-device-&lt;设备名&gt;"]
     end
@@ -71,8 +71,9 @@ sequenceDiagram
     D->>D: 写进设备 authorized_keys
     D->>D: 写设备侧 ~/.ssh/config<br/>Host onboard-server-&lt;设备名&gt;
     S->>S: 写服务器侧 ~/.ssh/config<br/>Host onboard-device-&lt;设备名&gt;（含 RemoteForward）
-    D->>S: 建设备档案到 ~/.codex/skills/device-onboard/
-    D->>S: 写 ~/.codex/AGENTS.md 设备会话块（幂等）
+    D->>S: 探测服务器装了哪些 harness（codex / claude）
+    D->>S: 给每个 harness 建自己的设备档案（~/.codex 或 ~/.claude 的 skills/device-onboard/）
+    D->>S: 写各自记忆文件的设备会话块（幂等）
     D->>S: 反向通道真握手验证
     Note over D,S: 让服务器在探测端口上主动连回设备一次<br/>必须回显 DEVICE-ONBOARD-E2E-OK 才算通
     D->>U: 完成，打印用法
@@ -86,8 +87,9 @@ sequenceDiagram
 - **设备身份只走环境变量**：`DEVICE_ONBOARD_ID` / `DEVICE_ONBOARD_DEVICE_ALIAS` 由
   `device-harness` 在 `ssh -t` 时传进服务器会话，用来判断「本次会话来自哪台设备」；
   设备里的文件用 `ssh onboard-device-<设备名>` / `scp` 读写。
-- **`~/.codex/AGENTS.md` 用独立标记块维护**：块已存在就整体替换、不存在就追加、文件不存在就创建，
-  块以外的内容一律不动；回滚不管它。`DEVICE_ONBOARD_AGENTS_MD=0` 可跳过。
+- **记忆文件用独立标记块维护**：`~/.codex/AGENTS.md`（AGENTS 标记）与 `~/.claude/CLAUDE.md`
+  （CLAUDE 标记）；块已存在就整体替换、不存在就追加、文件不存在就创建，块以外的内容一律不动；
+  回滚不管它们。`DEVICE_ONBOARD_AGENTS_MD=0` / `DEVICE_ONBOARD_CLAUDE_MD=0` 可分别跳过。
 - **首次接入路径带失败回滚**：半路挂了会按标记撤销、还原备份。
 - **"已有配置"重跑会走跳过路径**，那条路径**绝不改动** `~/.ssh/config`。
 
@@ -197,12 +199,13 @@ flowchart TD
 
 ## 9. 服务器侧看到什么
 
-- **设备档案**：`~/.codex/skills/device-onboard/SKILL.md`
+- **设备档案**：`~/.codex/skills/device-onboard/SKILL.md` 与
+  `~/.claude/skills/device-onboard/SKILL.md`（只给探测到的 harness 建；内容完全相同）
   —— 一个 skill 记所有设备，每台一个块；还有一个放在所有设备块之外的
   **共享约定块**，说明"本次会话来自哪台设备"以环境变量形式传进来
   （`DEVICE_ONBOARD_ID`、`DEVICE_ONBOARD_DEVICE_ALIAS`）。
-- **全局指令**：`~/.codex/AGENTS.md` 里的「设备会话」标记块（设备接入时幂等写入；
-  codex 只读这个文件，不读 `~/.agents/AGENTS.md`）
+- **全局指令**：各 harness 自己记忆文件里的「设备会话」标记块（设备接入时幂等写入；
+  codex 只读 `~/.codex/AGENTS.md`，不读 `~/.agents/AGENTS.md`；claude 读 `~/.claude/CLAUDE.md`）
   —— 让 codex 一眼知道：有 `DEVICE_ONBOARD_ID` 就是设备会话，没有就是普通服务器会话，别瞎猜。
 - **回连入口**：`~/.ssh/config` 里的 `Host onboard-device-<设备名>`
   （`127.0.0.1:<REVERSE_PORT>`）。

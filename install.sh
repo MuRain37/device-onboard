@@ -232,15 +232,18 @@ ak="\$HOME/.ssh/authorized_keys"
 if [ -f "\$ak" ] && grep -qF "device-onboard:$device_id" "\$ak" 2>/dev/null; then
     grep -vF "device-onboard:$device_id" "\$ak" > "\$ak.rollback" && mv "\$ak.rollback" "\$ak" && chmod 600 "\$ak" 2>/dev/null && echo REMOVED_AUTHORIZED_KEY
 fi
-skill="\$HOME/.codex/skills/device-onboard/SKILL.md"
-if [ "$SKILL_WAS_NEW" = 1 ]; then
-    if [ -f "\$skill" ]; then rm -f "\$skill" && echo REMOVED_SKILL_FILE; fi
-elif [ -f "\$skill" ] && grep -qF "<!-- DEVICE-ONBOARD:$device_id BEGIN -->" "\$skill" 2>/dev/null; then
-    t=\$(mktemp)
-    awk -v b="<!-- DEVICE-ONBOARD:$device_id BEGIN -->" -v e="<!-- DEVICE-ONBOARD:$device_id END -->" '\$0==b{skip=1;next} \$0==e{skip=0;next} !skip{print}' "\$skill" > "\$t"
-    mv "\$t" "\$skill" 2>/dev/null; chmod 600 "\$skill" 2>/dev/null
-    echo STRIPPED_SKILL_BLOCK
-fi
+# 记忆文件（~/.codex/AGENTS.md、~/.claude/CLAUDE.md）刻意不回滚：用户裁决，
+# 提示块是「无害的说明书」，留着比半路摘掉更安全。
+for skill in "\$HOME/.codex/skills/device-onboard/SKILL.md" "\$HOME/.claude/skills/device-onboard/SKILL.md"; do
+    if [ "$SKILL_WAS_NEW" = 1 ]; then
+        if [ -f "\$skill" ]; then rm -f "\$skill" && echo REMOVED_SKILL_FILE; fi
+    elif [ -f "\$skill" ] && grep -qF "<!-- DEVICE-ONBOARD:$device_id BEGIN -->" "\$skill" 2>/dev/null; then
+        t=\$(mktemp)
+        awk -v b="<!-- DEVICE-ONBOARD:$device_id BEGIN -->" -v e="<!-- DEVICE-ONBOARD:$device_id END -->" '\$0==b{skip=1;next} \$0==e{skip=0;next} !skip{print}' "\$skill" > "\$t"
+        mv "\$t" "\$skill" 2>/dev/null; chmod 600 "\$skill" 2>/dev/null
+        echo STRIPPED_SKILL_BLOCK
+    fi
+done
 if [ "$SERVER_KEY_CREATED" = 1 ]; then
     rm -f "\$HOME/.ssh/device-onboard/${device_id}-server" "\$HOME/.ssh/device-onboard/${device_id}-server.pub" 2>/dev/null && echo REMOVED_SERVER_KEY
 fi
@@ -548,43 +551,49 @@ EOF
 
 printf '%s\n' "$remote_block" | server_ssh "set -eu; file=\"\$HOME/.ssh/config\"; tmp=\"\$(mktemp)\"; mkdir -p \"\$HOME/.ssh\"; if [ -f \"\$file\" ]; then awk -v begin='$remote_begin' -v end='$remote_end' '\$0 == begin {skip=1; next} \$0 == end {skip=0; next} !skip {print}' \"\$file\" > \"\$tmp\"; cp \"\$file\" \"\$file.device-onboard.bak\"; else : > \"\$tmp\"; fi; cat >> \"\$tmp\"; mv \"\$tmp\" \"\$file\"; chmod 600 \"\$file\""
 
-# ---------- 服务器端 ~/.codex/AGENTS.md（可选；任何一步失败都不影响接入） ----------
-# Codex 只读 ~/.codex/AGENTS.md（实测：它不读 ~/.agents/AGENTS.md），所以设备会话说明
-# 必须写在这里，且用独立标记块维护：块已存在就整体替换，不存在就追加，文件不存在就创建。
-# 绝不碰块以外的任何内容。回滚逻辑刻意不动这一块（用户裁决：回滚不管 AGENTS.md）。
-# DEVICE_ONBOARD_AGENTS_MD=0 可整体跳过。
-setup_server_agents_md() {
-    if [ "${DEVICE_ONBOARD_AGENTS_MD:-1}" = "0" ]; then
-        printf '按 DEVICE_ONBOARD_AGENTS_MD=0 跳过服务器 ~/.codex/AGENTS.md 配置。\n'
-        return 0
-    fi
-    _agents_script=$(cat <<'REMOTE_AGENTS_EOF'
+# ---------- 服务器端各 harness 的「记忆文件」提示块（可选；失败不影响接入） ----------
+# 每个 harness 有自己的全局指令文件：
+#   codex  → ~/.codex/AGENTS.md   （实测 codex 只读这里，不读 ~/.agents/AGENTS.md）
+#   claude → ~/.claude/CLAUDE.md
+# 用独立标记块维护：块已存在就整体替换，不存在就追加，文件不存在就创建。
+# 绝不碰块以外的任何内容。回滚逻辑刻意不动这一块（用户裁决：回滚不管记忆文件）。
+setup_server_md() {
+    _file=$1        # 远端文件（字面量，含 $HOME）
+    _begin=$2       # 块起始标记
+    _end=$3         # 块结束标记
+    _skill_path=$4  # 提示块里指向的设备档案路径
+    # 未引用的 heredoc：$_file/$_begin/$_end/$_skill_path 在本地展开；块里若出现
+    # 反引号必须写成 \` —— 未引用 heredoc 里反引号会被当命令替换跑在本地（踩过）。
+    _script=$(cat <<MD_SCRIPT_EOF
 set +e
-file="$HOME/.codex/AGENTS.md"
-mkdir -p "$HOME/.codex" 2>/dev/null || { echo AGENTS_FAIL; exit 0; }
-tmp=$(mktemp 2>/dev/null) || { echo AGENTS_FAIL; exit 0; }
-if [ -f "$file" ]; then
-    awk -v b='<!-- DEVICE-ONBOARD-AGENTS BEGIN -->' -v e='<!-- DEVICE-ONBOARD-AGENTS END -->' '$0 == b {skip=1; next} $0 == e {skip=0; next} !skip {print}' "$file" > "$tmp" 2>/dev/null || { rm -f "$tmp"; echo AGENTS_FAIL; exit 0; }
+file="$_file"
+dir=\$(dirname "\$file")
+mkdir -p "\$dir" 2>/dev/null || { echo MD_FAIL; exit 0; }
+tmp=\$(mktemp 2>/dev/null) || { echo MD_FAIL; exit 0; }
+if [ -f "\$file" ]; then
+    awk -v b='$_begin' -v e='$_end' '\$0 == b {skip=1; next} \$0 == e {skip=0; next} !skip {print}' "\$file" > "\$tmp" 2>/dev/null || { rm -f "\$tmp"; echo MD_FAIL; exit 0; }
 fi
-cat >> "$tmp" <<'AGENTS_BLOCK_EOF'
-<!-- DEVICE-ONBOARD-AGENTS BEGIN -->
+cat >> "\$tmp" <<'MD_BLOCK_EOF'
+$_begin
 ## 设备会话
-本服务器的设备登记见 ~/.codex/skills/device-onboard/SKILL.md。
+本服务器的设备登记见 $_skill_path。
 判断本次会话来自哪台设备：看环境变量 DEVICE_ONBOARD_ID（有值就是它）。
 DEVICE_ONBOARD_DEVICE_CWD 是发起设备上用户当时的目录，DEVICE_ONBOARD_DEVICE_CWD_REL 是它
-相对该设备家目录的形式（`.` = 家目录本身，空 = 在家目录之外）—— 这两个只是「用户当时在哪」
+相对该设备家目录的形式（\`.\` = 家目录本身，空 = 在家目录之外）—— 这两个只是「用户当时在哪」
 的线索，路径只在那台设备上有效，不要在这台服务器上 cd 它。
-设备上的文件用 `ssh onboard-device-<设备名>` / `scp` 读写。
+设备上的文件用 \`ssh onboard-device-<设备名>\` / \`scp\` 读写。
 没有值 → 这是普通服务器会话，不要假设来自设备。
-<!-- DEVICE-ONBOARD-AGENTS END -->
-AGENTS_BLOCK_EOF
-mv "$tmp" "$file" 2>/dev/null && chmod 600 "$file" 2>/dev/null && echo AGENTS_OK || { rm -f "$tmp"; echo AGENTS_FAIL; }
-REMOTE_AGENTS_EOF
+$_end
+MD_BLOCK_EOF
+mv "\$tmp" "\$file" 2>/dev/null && chmod 600 "\$file" 2>/dev/null && echo MD_OK || { rm -f "\$tmp"; echo MD_FAIL; }
+MD_SCRIPT_EOF
 )
-    _agents_out=$(printf '%s\n' "$_agents_script" | server_ssh 'sh -s' 2>&1 || true)
-    case "$_agents_out" in
-        *AGENTS_OK*) printf '✅ 已写入服务器 ~/.codex/AGENTS.md 的设备会话说明块。\n' ;;
-        *)          printf '警告：写入服务器 ~/.codex/AGENTS.md 失败，跳过（不影响接入）。\n' >&2 ;;
+    _out=$(printf '%s\n' "$_script" | server_ssh 'sh -s' 2>&1 || true)
+    # 提示里把远端字面量的 $HOME 显示成 ~，别让人对着 "$HOME/..." 发愣。
+    _display=$(printf '%s' "$_file" | sed 's|^\$HOME|~|')
+    case "$_out" in
+        *MD_OK*) printf '✅ 已写入服务器 %s 的设备会话提示块。\n' "$_display" ;;
+        *)       printf '警告：写入服务器 %s 失败，跳过（不影响接入）。\n' "$_display" >&2 ;;
     esac
     return 0
 }
@@ -632,31 +641,67 @@ DEVICE_ONBOARD_DEVICE_CWD 只是「用户当时站在哪」这条线索，**它�
 $conv_end
 EOF
 )
-skill_dir_remote='$HOME/.codex/skills/device-onboard'
-skill_file_remote="$skill_dir_remote/SKILL.md"
+# ---------- 设备档案（SKILL.md）：按 harness 分发 ----------
+# 每个 harness 有自己的技能目录，内容完全相同，只是落点不同。
+write_server_skill() {
+    _dir=$1                       # 远端技能目录（字面量，含 $HOME）
+    _file="$_dir/SKILL.md"
+    if server_ssh "test -f \"$_file\"" 2>/dev/null; then
+        # 已有档案：只替换共享约定块与本设备那一块，其它内容原样保留
+        printf '%s\n' "$conv_block
+$skill_block" | server_ssh "set -eu; file=\"$_file\"; tmp=\"\$(mktemp)\"; awk -v begin='$conv_begin' -v end='$conv_end' '\$0 == begin {skip=1; next} \$0 == end {skip=0; next} !skip {print}' \"\$file\" | awk -v begin='$skill_begin' -v end='$skill_end' '\$0 == begin {skip=1; next} \$0 == end {skip=0; next} !skip {print}' > \"\$tmp\"; cp \"\$file\" \"\$file.device-onboard.bak\"; cat >> \"\$tmp\"; mv \"\$tmp\" \"\$file\"" 2>&1 || true
+    else
+        # 新档案：头部在本地拼好（带 frontmatter，真换行），整体送过去落盘。
+        # 不在远端用 printf 拼 —— 那需要多层反斜杠转义，极易写出乱码。
+        SKILL_WAS_NEW=1
+        {
+            printf -- '---\n'
+            printf -- 'name: device-onboard\n'
+            printf -- 'description: SSH devices on this server (incl. which one this session is from).\n'
+            printf -- '---\n\n'
+            printf -- '# Device Onboard\n\n'
+            printf '%s\n' "$conv_block"
+            printf '\n'
+            printf '%s\n' "$skill_block"
+        } | server_ssh "set -eu; dir=\"$_dir\"; mkdir -p \"\$dir\"; cat > \"\$dir/SKILL.md\"; chmod 600 \"\$dir/SKILL.md\"" 2>&1 || true
+    fi
+}
 
-if server_ssh "test -f \"$skill_file_remote\"" 2>/dev/null; then
-    # 已有档案：只替换本设备那一块，其它内容原样保留
-    printf '%s\n' "$conv_block
-$skill_block" | server_ssh "set -eu; file=\"$skill_file_remote\"; tmp=\"\$(mktemp)\"; awk -v begin='$conv_begin' -v end='$conv_end' '\$0 == begin {skip=1; next} \$0 == end {skip=0; next} !skip {print}' \"\$file\" | awk -v begin='$skill_begin' -v end='$skill_end' '\$0 == begin {skip=1; next} \$0 == end {skip=0; next} !skip {print}' > \"\$tmp\"; cp \"\$file\" \"\$file.device-onboard.bak\"; cat >> \"\$tmp\"; mv \"\$tmp\" \"\$file\""
-else
-    # 新档案：头部在本地拼好（带 frontmatter，真换行），整体送过去落盘。
-    # 不在远端用 printf 拼 —— 那需要多层反斜杠转义，极易写出乱码。
-    SKILL_WAS_NEW=1
-    {
-        printf -- '---\n'
-        printf -- 'name: device-onboard\n'
-        printf -- 'description: SSH devices on this server (incl. which one this session is from).\n'
-        printf -- '---\n\n'
-        printf -- '# Device Onboard\n\n'
-        printf '%s\n' "$conv_block"
-        printf '\n'
-        printf '%s\n' "$skill_block"
-    } | server_ssh "set -eu; dir=\"$skill_dir_remote\"; mkdir -p \"\$dir\"; cat > \"\$dir/SKILL.md\"; chmod 600 \"\$dir/SKILL.md\""
+# ---------- 探测服务器装了哪些 harness，按需分发档案与提示块 ----------
+# 装了哪个就给哪个铺一份；一个都没装就什么都不写（不凭空建目录）。
+# 探测不能只靠 command -v：非交互 ssh 的 PATH 未必含 ~/.local/bin，所以补几个常见绝对路径。
+detect_server_harnesses() {
+    server_ssh 'for c in codex claude; do
+        if command -v "$c" >/dev/null 2>&1 || [ -x "$HOME/.local/bin/$c" ] || [ -x "/usr/local/bin/$c" ]; then
+            printf "%s " "$c"
+        fi
+    done' 2>/dev/null || true
+}
+
+harnesses=$(detect_server_harnesses)
+if [ -z "$harnesses" ]; then
+    printf '提示：服务器上没探测到 codex / claude，跳过设备档案与提示块的写入。\n'
 fi
-
-# 服务器上的全局指令块：写进 ~/.codex/AGENTS.md，让普通/设备会话都能一眼判断身份。
-setup_server_agents_md || true
+for _harness in $harnesses; do
+    case "$_harness" in
+        codex)
+            write_server_skill '$HOME/.codex/skills/device-onboard'
+            if [ "${DEVICE_ONBOARD_AGENTS_MD:-1}" = "0" ]; then
+                printf '按 DEVICE_ONBOARD_AGENTS_MD=0 跳过 codex 的提示块。\n'
+            else
+                setup_server_md '$HOME/.codex/AGENTS.md' '<!-- DEVICE-ONBOARD-AGENTS BEGIN -->' '<!-- DEVICE-ONBOARD-AGENTS END -->' '~/.codex/skills/device-onboard/SKILL.md'
+            fi
+            ;;
+        claude)
+            write_server_skill '$HOME/.claude/skills/device-onboard'
+            if [ "${DEVICE_ONBOARD_CLAUDE_MD:-1}" = "0" ]; then
+                printf '按 DEVICE_ONBOARD_CLAUDE_MD=0 跳过 claude 的提示块。\n'
+            else
+                setup_server_md '$HOME/.claude/CLAUDE.md' '<!-- DEVICE-ONBOARD-CLAUDE BEGIN -->' '<!-- DEVICE-ONBOARD-CLAUDE END -->' '~/.claude/skills/device-onboard/SKILL.md'
+            fi
+            ;;
+    esac
+done
 
 cat > "$STATE_FILE" <<EOF
 DEVICE_ID=$device_id

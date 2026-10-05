@@ -207,6 +207,11 @@ esac
 case "$*" in
     *-R*localhost*) exec sleep 30 ;;
 esac
+# harness 探测（install.sh 会问服务器装了哪些 harness）：默认当装了 codex，
+# 老用例行为不变；新用例用 FAKE_HARNESSES 指定（可含 claude，或留空）。
+case "$*" in
+    *'for c in codex claude'*) printf '%s' "${FAKE_HARNESSES-codex}" ;;
+esac
 exit 0
 EOF
 chmod 755 "$FAKE_BIN/ssh"
@@ -644,5 +649,82 @@ printf '%s\n' "$got" | grep -qxF 'ARG=[-p]' || {
     printf '选项参数缺失\n%s\n' "$got" >&2
     exit 1
 }
+
+# --- 按 harness 分发：服务器装了哪个 harness，就给哪个铺档案 + 提示块 ---
+# codex → ~/.codex/skills/device-onboard/SKILL.md + ~/.codex/AGENTS.md
+# claude → ~/.claude/skills/device-onboard/SKILL.md + ~/.claude/CLAUDE.md
+# 一个都没装 → 什么都不写（不能凭空建目录）。
+cat > "$FAKE_BIN/ssh" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_SSH_LOG"
+case "$*" in *'sh -s'*) exec sh ;; esac
+case "$*" in *DEVICE-ONBOARD-E2E-OK*) printf 'DEVICE-ONBOARD-E2E-OK' ;; esac
+case "$*" in *反向隧道已建立*) printf '✅ 反向隧道已建立\n'; exec sleep 30 ;; esac
+case "$*" in *-R*localhost*) exec sleep 30 ;; esac
+# 技能档案的读写是「复合命令」而不是 sh -s：把最后一个参数当命令本地跑一遍，
+# 沙箱里才会真的落盘 —— 否则断言只能看到“命令发出去了”，看不到结果。
+case "$*" in
+    *skills/device-onboard*)
+        for a in "$@"; do last=$a; done
+        exec sh -c "$last"
+        ;;
+esac
+case "$*" in *'for c in codex claude'*) printf '%s' "${FAKE_HARNESSES-}" ;; esac
+exit 0
+EOF
+cat > "$FAKE_BIN/sshd" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+chmod 755 "$FAKE_BIN/ssh" "$FAKE_BIN/sshd"
+
+run_install_with_harnesses() {
+    _h=$1
+    _home=$2
+    mkdir -p "$_home"
+    printf '1\nxiaomitest\n134.175.91.169\nubuntu\n22\n' | env FAKE_SSH_LOG="$_home/ssh.log" FAKE_HARNESSES="$_h" TERMUX_VERSION=0.118 \
+        PATH="$FAKE_BIN:$PATH" HOME="$_home" \
+        DEVICE_ONBOARD_REVERSE_PORT_START=2230 DEVICE_ONBOARD_REVERSE_PORT_END=2230 \
+        DEVICE_ONBOARD_CONFIG_DIR="$_home/cfg" DEVICE_ONBOARD_KEY_DIR="$_home/keys" DEVICE_ONBOARD_BIN_DIR="$_home/bin" \
+        sh "$ROOT/install.sh" >"$_home/out" 2>&1 || true
+}
+
+# ① 两个都装：两份档案（内容一致）+ 两个记忆文件（各指自己的档案）
+run_install_with_harnesses 'codex claude' "$TMP_HOME/h30"
+CX_SKILL="$TMP_HOME/h30/.codex/skills/device-onboard/SKILL.md"
+CL_SKILL="$TMP_HOME/h30/.claude/skills/device-onboard/SKILL.md"
+CX_MD="$TMP_HOME/h30/.codex/AGENTS.md"
+CL_MD="$TMP_HOME/h30/.claude/CLAUDE.md"
+for f in "$CX_SKILL" "$CL_SKILL" "$CX_MD" "$CL_MD"; do
+    [ -f "$f" ] || { printf '该写却没写：%s\n' "$f" >&2; sed 's/^/  /' "$TMP_HOME/h30/out" >&2; exit 1; }
+done
+cmp -s "$CX_SKILL" "$CL_SKILL" || { printf 'codex 与 claude 的档案内容不一致\n' >&2; exit 1; }
+grep -q '<!-- DEVICE-ONBOARD-AGENTS BEGIN -->' "$CX_MD" || { printf 'codex 记忆文件缺起始标记\n' >&2; exit 1; }
+grep -q '~/.codex/skills/device-onboard/SKILL.md' "$CX_MD" || { printf 'codex 记忆文件没指向自己的档案\n' >&2; exit 1; }
+grep -q '<!-- DEVICE-ONBOARD-CLAUDE BEGIN -->' "$CL_MD" || { printf 'claude 记忆文件缺起始标记\n' >&2; exit 1; }
+grep -q '<!-- DEVICE-ONBOARD-CLAUDE END -->' "$CL_MD" || { printf 'claude 记忆文件缺结束标记\n' >&2; exit 1; }
+grep -q '~/.claude/skills/device-onboard/SKILL.md' "$CL_MD" || { printf 'claude 记忆文件没指向 claude 的档案\n' >&2; exit 1; }
+grep -q 'DEVICE_ONBOARD_ID' "$CL_MD" || { printf 'claude 记忆文件没说明身份变量\n' >&2; exit 1; }
+for f in "$CX_MD" "$CL_MD"; do
+    _m=$(stat -c %a "$f" 2>/dev/null || stat -f %Lp "$f")
+    [ "$_m" = 600 ] || { printf '%s 权限应为 600，实际 %s\n' "$f" "$_m" >&2; exit 1; }
+done
+
+# ② 只装 claude：~/.codex 下一个文件都不该出现
+run_install_with_harnesses 'claude' "$TMP_HOME/h31"
+[ -f "$TMP_HOME/h31/.claude/CLAUDE.md" ] || { printf '只装 claude 却没写 CLAUDE.md\n' >&2; exit 1; }
+[ -f "$TMP_HOME/h31/.claude/skills/device-onboard/SKILL.md" ] || { printf '只装 claude 却没写档案\n' >&2; exit 1; }
+if [ -e "$TMP_HOME/h31/.codex" ]; then
+    printf '只装了 claude，却凭空建了 ~/.codex\n' >&2
+    exit 1
+fi
+
+# ③ 一个都没装：目录都不建，并且明确提示
+run_install_with_harnesses '' "$TMP_HOME/h32"
+if [ -e "$TMP_HOME/h32/.codex" ] || [ -e "$TMP_HOME/h32/.claude" ]; then
+    printf '没探测到 harness，却建了目录\n' >&2
+    exit 1
+fi
+grep -q '没探测到' "$TMP_HOME/h32/out" || { printf '没探测到 harness 时没有提示\n' >&2; sed 's/^/  /' "$TMP_HOME/h32/out" >&2; exit 1; }
 
 printf 'smoke tests passed\n'
