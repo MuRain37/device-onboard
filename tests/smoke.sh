@@ -633,6 +633,11 @@ cat > "$FAKE_BIN/claude" <<'EOF'
 #!/bin/sh
 printf 'ARGC=%s\n' "$#"
 for a in "$@"; do printf 'ARG=[%s]\n' "$a"; done
+# 也把 4 个上下文变量打出来：换 harness 走的是 `cd <目录> && 命令` 这条复合路径，
+# 变量必须对它同样可见（实测踩过：赋值只贴在 cd 上，cd 之后就全丢了）。
+printf 'ID=[%s]\n' "$DEVICE_ONBOARD_ID"
+printf 'CWD=[%s]\n' "$DEVICE_ONBOARD_DEVICE_CWD"
+printf 'REL=[%s]\n' "$DEVICE_ONBOARD_DEVICE_CWD_REL"
 EOF
 chmod 755 "$FAKE_BIN/claude"
 run_harness_in "$TMP_HOME" "$TMP_HOME/remote4.log" claude -p 'two words here'
@@ -647,6 +652,23 @@ printf '%s\n' "$got" | grep -qxF 'ARG=[two words here]' || {
 }
 printf '%s\n' "$got" | grep -qxF 'ARG=[-p]' || {
     printf '选项参数缺失\n%s\n' "$got" >&2
+    exit 1
+}
+
+# ⑤ 复合命令（cd 之后）也必须拿到那 4 个变量
+# 实测踩过：`VAR=x cd <目录> && 命令` 里的赋值只贴在 cd 这一个命令上（bash 下 cd
+# 不是 special builtin，赋值不留在 shell 里）→ cd 之后的命令读 DEVICE_ONBOARD_ID
+# 全是空。device-harness claude 正好死在这条路上。
+printf '%s\n' "$got" | grep -qxF 'ID=[xiaomitest]' || {
+    printf '换 harness 后身份变量丢了 —— 赋值只贴在 cd 上？\n%s\n' "$got" >&2
+    exit 1
+}
+printf '%s\n' "$got" | grep -qxF "CWD=[$TMP_HOME]" || {
+    printf '换 harness 后目录变量丢了\n%s\n' "$got" >&2
+    exit 1
+}
+printf '%s\n' "$got" | grep -qxF 'REL=[.]' || {
+    printf '换 harness 后 REL 丢了\n%s\n' "$got" >&2
     exit 1
 }
 

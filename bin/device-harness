@@ -166,5 +166,9 @@ printf '隧道就绪。在服务器上启动 %s（退出后隧道自动收起）
 # 把「本次会话来自哪台设备」和「设备侧当时在哪个目录」交给 harness。变量名和用法写在
 # 服务器上那份设备档案 + ~/.codex/AGENTS.md 里 —— 会话一开始就能看到。
 # 设备 ID / 别名来自配置（install 已限定字符集），但目录是任意内容，一律 squote 转义。
-ENV_PREFIX="DEVICE_ONBOARD_ID=$(squote "$DEVICE_ID") DEVICE_ONBOARD_DEVICE_ALIAS=$(squote "$DEVICE_HOST_ALIAS") DEVICE_ONBOARD_DEVICE_CWD=$(squote "$DEVICE_CWD") DEVICE_ONBOARD_DEVICE_CWD_REL=$(squote "$DEVICE_CWD_REL")"
+# 必须 export：RUN_CMD 常是 "cd <目录> && <命令>" 这种复合命令，
+# 而 "VAR=x cd <目录> && 命令" 里的赋值只贴在 cd 这一个命令上（bash 下 cd 不是
+# special builtin，赋值不留在 shell 里）→ cd 之后的命令根本看不到这几个变量。
+# 真机踩过：device-harness sh -c 'env | grep DEVICE_ONBOARD' 一行都打不出来。
+ENV_PREFIX="export DEVICE_ONBOARD_ID=$(squote "$DEVICE_ID") DEVICE_ONBOARD_DEVICE_ALIAS=$(squote "$DEVICE_HOST_ALIAS") DEVICE_ONBOARD_DEVICE_CWD=$(squote "$DEVICE_CWD") DEVICE_ONBOARD_DEVICE_CWD_REL=$(squote "$DEVICE_CWD_REL");"
 ssh -t "$SERVER_HOST_ALIAS" "$ENV_PREFIX $RUN_CMD"
