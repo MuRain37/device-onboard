@@ -2,6 +2,12 @@
 # 一条命令做完两件事：起反向隧道 + 在服务器上跑 harness（默认 codex）。
 # 两者同生共死 —— harness 一退出（或按 Ctrl-C），隧道跟着收掉。
 #
+# 用法：
+#   device-harness                    默认跑 codex
+#   device-harness claude             换别的 harness —— 第一个参数是什么就起什么
+#   device-harness -C '~/proj' claude 先给工作目录，再给 harness 命令
+#   device-harness claude -p '活'     命令后面的参数原样传给 harness
+#
 # 分成两个命令不行就在于「生命期」：隧道是后台长跑，harness 是前台交互，
 # 中间断了谁都发现不了。这里把它们绑一起，退出时一定收干净。
 set -eu
@@ -73,9 +79,20 @@ case "$HARNESS_CMD" in
     codex*) RUN_CMD="$HARNESS_CMD -C \"$DIR\"" ;;
     *)      RUN_CMD="cd \"$DIR\" && $HARNESS_CMD" ;;
 esac
-if [ "$#" -gt 0 ]; then
-    RUN_CMD="$RUN_CMD $*"
-fi
+
+# 单引号转义：' -> '\''
+# 两处要用：① harness 的剩余参数（可能带空格，例如 -p '一段话'）
+#            ② 设备侧当前目录（可能带空格或引号）
+# 不转义就会被远端 shell 拆散或展开 —— 前者是功能错，后者是注入口子。
+squote() {
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+# 剩余参数原样传给 harness：逐个转义后再拼，带空格/引号的参数才不会被拆散
+# （实测过：不转义时 `-p 'two words here'` 到远端会变成 4 个参数）。
+for _arg in "$@"; do
+    RUN_CMD="$RUN_CMD $(squote "$_arg")"
+done
 
 # ---------- 设备侧当前目录：作为「上下文」带给服务器上的 harness ----------
 # 注意定位：这是「用户当时站在哪」，是上下文，**不是身份**。身份仍只有
@@ -84,12 +101,7 @@ fi
 # 用它的是谁：服务器上的 agent。它想知道「要去哪台设备的哪个目录看文件」时，
 # 不必再猜一轮。绝对路径给「过去操作」用；相对家目录的短名给人看、给将来取名用。
 #
-# 必须单引号转义后再拼进远端命令行：目录名可能带空格或引号（macOS 上很常见），
-# 不转义就是一个能在服务器上注入命令的口子。
-squote() {
-    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
-}
-
+# 拼进远端命令行前一律 squote（上面已定义）：目录名可能带空格或引号（macOS 上很常见）。
 DEVICE_CWD=$(pwd -P 2>/dev/null || pwd)
 case "$DEVICE_CWD" in
     "$HOME")   DEVICE_CWD_REL='.' ;;          # 就在家目录

@@ -570,17 +570,18 @@ chmod 755 "$FAKE_BIN/codex"
 run_harness_in() {
     _dir=$1
     _log=$2
+    shift 2
     : > "$_log"
     ( cd "$_dir" && env FAKE_SSH_LOG="$TMP_HOME/hh3.log" FAKE_REMOTE_CMD="$_log" TERMUX_VERSION=0.118 \
         PATH="$TMP_HOME/b9:$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
         DEVICE_ONBOARD_CONFIG_FILE="$TMP_HOME/p9/config" \
-        sh "$TMP_HOME/b9/device-harness" codex >"$TMP_HOME/hh3.out" 2>&1 ) || true
+        sh "$TMP_HOME/b9/device-harness" ${1+"$@"} >"$TMP_HOME/hh3.out" 2>&1 ) || true
 }
 
 # ① 从一个带空格和单引号的目录里启动
 QDIR="$TMP_HOME/it's a proj"
 mkdir -p "$QDIR"
-run_harness_in "$QDIR" "$TMP_HOME/remote1.log"
+run_harness_in "$QDIR" "$TMP_HOME/remote1.log" codex
 if [ ! -s "$TMP_HOME/remote1.log" ]; then
     printf 'device-harness 没把远端命令行送出来（ssh 没被调用？）\n' >&2
     sed 's/^/  /' "$TMP_HOME/hh3.out" >&2
@@ -606,7 +607,7 @@ printf '%s\n' "$got" | grep -qxF "ID=[xiaomitest]" || {
 }
 
 # ② 就在家目录里：REL 应为 "."
-run_harness_in "$TMP_HOME" "$TMP_HOME/remote2.log"
+run_harness_in "$TMP_HOME" "$TMP_HOME/remote2.log" codex
 got=$(PATH="$FAKE_BIN:$PATH" sh -c "$(tail -1 "$TMP_HOME/remote2.log")" 2>&1)
 printf '%s\n' "$got" | grep -qxF 'REL=[.]' || {
     printf '在家目录时 REL 应该是「.」\n%s\n' "$got" >&2
@@ -614,10 +615,33 @@ printf '%s\n' "$got" | grep -qxF 'REL=[.]' || {
 }
 
 # ③ 在家目录之外：REL 应为空（空值有明确含义，不能被当成"家目录"）
-run_harness_in / "$TMP_HOME/remote3.log"
+run_harness_in / "$TMP_HOME/remote3.log" codex
 got=$(PATH="$FAKE_BIN:$PATH" sh -c "$(tail -1 "$TMP_HOME/remote3.log")" 2>&1)
 printf '%s\n' "$got" | grep -qxF 'REL=[]' || {
     printf '在家目录之外时 REL 应该是空\n%s\n' "$got" >&2
+    exit 1
+}
+
+# ④ 换 harness + 带空格的参数：剩余参数必须逐个转义，不能被拆散
+# （实测踩过：不转义时 `-p 'two words here'` 到远端会变成 4 个参数。）
+cat > "$FAKE_BIN/claude" <<'EOF'
+#!/bin/sh
+printf 'ARGC=%s\n' "$#"
+for a in "$@"; do printf 'ARG=[%s]\n' "$a"; done
+EOF
+chmod 755 "$FAKE_BIN/claude"
+run_harness_in "$TMP_HOME" "$TMP_HOME/remote4.log" claude -p 'two words here'
+got=$(PATH="$FAKE_BIN:$PATH" sh -c "$(tail -1 "$TMP_HOME/remote4.log")" 2>&1)
+printf '%s\n' "$got" | grep -qxF 'ARGC=2' || {
+    printf '换 harness / 参数被拆散：期望 2 个参数\n%s\n' "$got" >&2
+    exit 1
+}
+printf '%s\n' "$got" | grep -qxF 'ARG=[two words here]' || {
+    printf '带空格的参数没有原样送达\n%s\n' "$got" >&2
+    exit 1
+}
+printf '%s\n' "$got" | grep -qxF 'ARG=[-p]' || {
+    printf '选项参数缺失\n%s\n' "$got" >&2
     exit 1
 }
 

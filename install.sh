@@ -680,5 +680,6 @@ trap - EXIT INT TERM
 printf '\n✅ 设备接入完成。\n'
 printf '普通服务器：ssh %s\n' "$server_alias"
 printf '一键（隧道 + harness）：device-harness\n'
+printf '换 harness：device-harness <命令>（默认 codex，例如 device-harness claude）\n'
 printf '反向隧道：device-tunnel\n'
 printf '在服务器上跑 Harness：ssh %s codex\n' "$server_alias"
