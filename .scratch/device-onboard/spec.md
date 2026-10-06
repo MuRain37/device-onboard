@@ -14,7 +14,7 @@ Status: ready-for-agent
 
 脚本生成设备到服务器的专用密钥，并把设备公钥加入服务器；服务器生成独立的回连设备密钥，脚本把其公钥加入设备的 SSH 授权文件。脚本自动选择反向隧道端口，维护双方 `~/.ssh/config` 的自有标记区块，并在服务器的 canonical skill 中登记设备信息。
 
-接入完成后，用户通过三个独立入口工作：普通 SSH Host 进入服务器 shell，`device-tunnel` 前台启动反向 SSH 隧道，`server-harness <command>` 通过 SSH 在服务器上启动指定 Harness。安装脚本重跑时更新本地命令；已有设备配置存在时跳过首次接入。
+接入完成后，用户通过三个独立入口工作：普通 SSH Host 进入服务器 shell，`device-tunnel` 前台启动反向 SSH 隧道，用 `ssh onboard-server-<设备名> <command>` 在服务器上启动指定 Harness（`device-harness` 则一键把隧道与 Harness 绑成同生共死的一条命令）。安装脚本重跑时更新本地命令；已有设备配置存在时跳过首次接入。
 
 ## User Stories
 
@@ -48,7 +48,7 @@ Status: ready-for-agent
 28. 作为设备使用者，我希望用普通 SSH Host 进入服务器交互式 shell，从而处理不属于 Harness 的任务。
 29. 作为设备使用者，我希望用 `device-tunnel` 在前台启动反向 SSH 隧道，从而能看到错误并用 `Ctrl-C` 结束连接。
 30. 作为设备使用者，我希望反向端口被占用时隧道命令立即失败，从而不会误以为连接已经建立。
-31. 作为设备使用者，我希望用 `server-harness <command>` 启动服务器上的 Harness，从而不必先登录服务器再手工输入命令。
+31. 作为设备使用者，我希望用 `ssh onboard-server-<设备名> <command>` 启动服务器上的 Harness，从而不必先登录服务器再手工输入命令。
 32. 作为设备使用者，我希望 Harness 命令通过普通服务器 Host 执行，而不是为每个 Harness 生成 SSH Host，从而保持 SSH 配置简单。
 33. 作为设备使用者，我希望 SSH 断开时远程 Harness 进程结束，从而首版不留下后台任务。
 34. 作为维护者，我希望首版只支持 macOS，从而先验证接入链路，不被 Linux、Termux 和系统服务差异拖慢。
@@ -73,8 +73,8 @@ Status: ready-for-agent
 - 接入流程需要设备的 macOS SSH 服务可用，因为服务器回连必须经过设备主动建立的反向隧道。
 - 接入流程使用一个临时前台反向隧道完成端到端验证；验证完成后关闭，不提供后台保活。
 - 日常 `device-tunnel` 命令以前台运行反向隧道，端口转发失败时立即退出，用户用 `Ctrl-C` 结束。
-- 日常 `server-harness <command>` 复用普通服务器 Host，通过交互式 SSH 在服务器执行远程 Harness 命令。
-- 首版不维护 Harness 注册表；命令由用户传给 `server-harness`，工作目录通过命令参数或远程 shell 处理。
+- 日常用 `ssh onboard-server-<设备名> <command>` 复用普通服务器 Host，通过交互式 SSH 在服务器执行远程 Harness 命令；`device-harness` 则一键编排（起反向隧道 + 跑 harness，同生共死）。
+- 首版不维护 Harness 注册表；命令由用户通过 `ssh onboard-server-<设备名> <command>` 传入，工作目录通过命令参数或远程 shell 处理。
 - 同名设备只有在已有身份与当前 SSH 主机指纹或接入密钥一致时才允许覆盖，否则停止并报告冲突。
 - 服务器只需要普通 SSH 用户权限；首版不修改系统级 sshd、防火墙或服务配置。
 

@@ -20,7 +20,7 @@
 - 设备密钥目录：`~/.ssh/device-onboard/`
 - 设备 SSH 配置：`~/.ssh/config`
 - 服务器 SSH 配置：`~/.ssh/config`
-- 唯一 skill：`~/.agents/skills/device-onboard/SKILL.md`
+- 唯一 skill：`~/.codex/skills/device-onboard/SKILL.md`
 
 设备侧生成普通服务器连接和反向隧道两个 Host。服务器侧生成一个通过反向隧道回连设备的 Host。Harness 由菜单通过普通服务器 Host 执行远程命令启动，不为每个 Harness 单独生成 SSH Host。
 
@@ -65,7 +65,7 @@ flowchart TD
     O -- 是 --> P[显示日常命令]
     P --> Q{用户之后运行哪个命令?}
     Q -- 保持反向连接 --> R[device-tunnel 前台运行]
-    Q -- 启动远程 Harness --> S[server-harness codex]
+    Q -- 启动远程 Harness --> S[ssh onboard-server-&lt;设备名&gt; codex]
     Q -- 普通服务器 shell --> T[ssh 服务器 Host]
 ```
 
@@ -83,7 +83,7 @@ sh ./install.sh
 
 ```sh
 device-tunnel
-server-harness codex
+ssh onboard-server-<设备名> codex
 ssh onboard-server-<设备名>
 ```
 
@@ -91,7 +91,7 @@ ssh onboard-server-<设备名>
 
 ### 1. 启动与预检查
 
-用户运行 `sh ./install.sh`。脚本检查当前系统是否为 macOS，并确认 `ssh`、`ssh-keygen` 可用、`~/.ssh` 可访问；随后安装 `device-tunnel` 和 `server-harness` 命令。首次安装且没有设备档案时，安装脚本直接进入接入菜单。
+用户运行 `sh ./install.sh`。脚本检查当前系统是否为 macOS，并确认 `ssh`、`ssh-keygen` 可用、`~/.ssh` 可访问；随后安装 `device-tunnel` 和 `device-harness` 命令。首次安装且没有设备档案时，安装脚本直接进入接入菜单。
 
 预检查失败时，脚本显示具体缺项并退出，不修改文件。
 
@@ -133,7 +133,7 @@ ssh onboard-server-<设备名>
 
 ### 6. 写入配置并验证
 
-脚本备份已有配置，只更新 `~/.ssh/config` 中自己标记的区块，并写入服务器的 `~/.agents/skills/device-onboard/SKILL.md` 设备记录。主机名已存在且身份不匹配时停止，不覆盖。
+脚本备份已有配置，只更新 `~/.ssh/config` 中自己标记的区块，并写入服务器的 `~/.codex/skills/device-onboard/SKILL.md` 设备记录。主机名已存在且身份不匹配时停止，不覆盖。
 
 然后接入程序启动临时反向隧道，自动验证设备到服务器和服务器到设备的连接，验证后关闭临时隧道。两项都成功后显示结果和日常使用命令。这个临时隧道只用于首次配置，不会常驻。
 
@@ -142,7 +142,8 @@ ssh onboard-server-<设备名>
 ## 接入成功后的命令
 
 - `device-tunnel`：以前台方式启动反向 SSH 隧道，按 `Ctrl-C` 结束。
-- `server-harness codex`：通过 SSH 在服务器启动 Codex；也可传入其他已安装在服务器上的 Harness 命令，例如 `server-harness claude`。
+- `ssh onboard-server-<设备名> codex`：通过 SSH 在服务器启动 Codex；也可传入其他已安装在服务器上的 Harness 命令，例如 `ssh onboard-server-<设备名> claude`。
+- `device-harness`：一键编排（起反向隧道 + 在服务器上跑 harness，默认 codex），隧道与 harness 同生共死。
 - `ssh onboard-server-<设备名>`：进入普通服务器 shell。
 
 本机已有一个名为 `tunnel` 的独立命令，因此新工具使用 `device-tunnel`，不覆盖现有命令。底层仍使用普通服务器 SSH Host，并配置 `RemoteForward`；命令以前台方式运行，端口冲突时立即失败，按 `Ctrl-C` 断开。接入程序还会通过服务器回连设备完成端到端检查。
@@ -152,16 +153,16 @@ ssh onboard-server-<设备名>
 ```sh
 ssh onboard-server-<设备名>
 ssh -N onboard-tunnel-<设备名>
-server-harness codex
+ssh onboard-server-<设备名> codex
 ```
 
-Harness 启动命令是一个独立的本地命令，不是每个 Harness 单独生成一个 SSH Host。它通过设备配置选择服务器连接，并以前台交互 SSH 启动远程 Harness；SSH 断开后 Harness 进程结束。
+Harness 通过普通服务器 Host 以交互式 SSH 启动，不为每个 Harness 单独生成一个 SSH Host。想要「起隧道 + 跑 harness」一步到位时用 `device-harness`：它负责隧道与 harness 两条进程的生命期，退出时一起收干净；SSH 断开后远程 Harness 进程随之结束。
 
 ## 流程边界
 
 - 首次运行 `install.sh` 会安装本地命令并完成设备接入；检测到已有设备档案时只更新本地命令并显示日常命令。
 - 反向隧道由 `device-tunnel` 前台运行，不后台保活。
-- Harness 通过 `server-harness <命令>` 启动；首版不维护 Harness 注册表。
+- Harness 用普通服务器 Host（`ssh onboard-server-<设备名> <命令>`）启动，或用 `device-harness` 一键起隧道 + 跑 harness；首版不维护 Harness 注册表。
 - 首次接入以外不做自动恢复；中断后重新运行脚本，从接入流程开始。
 - 失败时清理本次新增内容；已有配置通过备份恢复。
 
