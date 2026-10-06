@@ -2,7 +2,11 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+# 取物理路径：device-harness 用 `pwd -P` 报告设备侧目录（故意解掉符号链接），
+# 而 macOS 上 mktemp 给的 /var/... 其实是指向 /private/var/... 的符号链接 ——
+# 两边不一致就会把「产品行为正确」误判成「路径没传到」。整棵树统一用物理路径。
 TMP_HOME=$(mktemp -d)
+TMP_HOME=$(CDPATH= cd -- "$TMP_HOME" && pwd -P)
 FAKE_BIN="$TMP_HOME/fake-bin"
 mkdir -p "$FAKE_BIN" "$TMP_HOME/config"
 trap 'rm -rf "$TMP_HOME"' EXIT
