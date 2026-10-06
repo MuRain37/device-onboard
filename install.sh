@@ -174,7 +174,7 @@ strip_local_device_block() {
 rollback_local_config() {
     _cfg="$HOME/.ssh/config"
     if strip_local_device_block; then
-        rollback_note "已从 ~/.ssh/config 去掉本设备（$device_id）的配置块。"
+        rollback_note "已从 ~/.ssh/config 去掉本设备（${device_id}）的配置块。"
     else
         rollback_note "本机 ~/.ssh/config 中没有本设备的配置块（无需去掉）。"
     fi
@@ -206,7 +206,7 @@ rollback_local_authorized_keys() {
 rollback_local_key() {
     if [ "$DEVICE_KEY_CREATED" = 1 ] && [ -n "$device_key" ]; then
         rm -f "$device_key" "$device_key.pub" 2>/dev/null || true
-        rollback_note "已删除本次生成的设备密钥（$device_key）。"
+        rollback_note "已删除本次生成的设备密钥（${device_key}）。"
     fi
 }
 
@@ -439,7 +439,7 @@ reverse_forward_works() {
     esac
 }
 
-# Termux 上 /tmp 不可写（Android 限制），必须用 $TMPDIR；再不行退回配置目录。
+# Termux 上 /tmp 不可写（Android 限制），必须用 ${TMPDIR}；再不行退回配置目录。
 probe_log_dir=${TMPDIR:-/tmp}
 if [ ! -d "$probe_log_dir" ] || [ ! -w "$probe_log_dir" ]; then
     probe_log_dir=$CONFIG_DIR
@@ -585,7 +585,7 @@ printf '%s\n' "$remote_block" | server_ssh "set -eu; file=\"\$HOME/.ssh/config\"
 # 用独立标记块维护：块已存在就整体替换，不存在就追加，文件不存在就创建。
 # 绝不碰块以外的任何内容。回滚逻辑刻意不动这一块（用户裁决：回滚不管记忆文件）。
 setup_server_md() {
-    _file=$1        # 远端文件（字面量，含 $HOME）
+    _file=$1        # 远端文件（字面量，含 ${HOME}）
     _begin=$2       # 块起始标记
     _end=$3         # 块结束标记
     _skill_path=$4  # 提示块里指向的设备档案路径
@@ -603,7 +603,7 @@ fi
 cat >> "\$tmp" <<'MD_BLOCK_EOF'
 $_begin
 ## 设备会话
-本服务器的设备登记见 $_skill_path。
+本服务器的设备登记见 ${_skill_path}。
 判断本次会话来自哪台设备：看环境变量 DEVICE_ONBOARD_ID（有值就是它）。
 DEVICE_ONBOARD_DEVICE_CWD 是发起设备上用户当时的目录，DEVICE_ONBOARD_DEVICE_CWD_REL 是它
 相对该设备家目录的形式（\`.\` = 家目录本身，空 = 在家目录之外）—— 这两个只是「用户当时在哪」
@@ -671,7 +671,7 @@ EOF
 # ---------- 设备档案（SKILL.md）：按 harness 分发 ----------
 # 每个 harness 有自己的技能目录，内容完全相同，只是落点不同。
 write_server_skill() {
-    _dir=$1                       # 远端技能目录（字面量，含 $HOME）
+    _dir=$1                       # 远端技能目录（字面量，含 ${HOME}）
     _file="$_dir/SKILL.md"
     if server_ssh "test -f \"$_file\"" 2>/dev/null; then
         # 已有档案：只替换共享约定块与本设备那一块，其它内容原样保留

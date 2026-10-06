@@ -433,7 +433,7 @@ if [ -f "$TMP_HOME/p10/config" ]; then
     exit 1
 fi
 
-# ~ 开头的目录：应翻译成远端可展开的 $HOME（手机上先展开就错了）
+# ~ 开头的目录：应翻译成远端可展开的 ${HOME}（手机上先展开就错了）
 # 这组需要能报「隧道就绪」的假 ssh —— 回滚那组只用来制造失败。
 cat > "$FAKE_BIN/ssh" <<'EOF'
 #!/bin/sh
@@ -819,5 +819,18 @@ grep -q '确认不是本设备' "$TMP_HOME/p31/out" || { printf '② 没有识�
 FAKE_CONFIG_PORTS='mac 2230' run_install_port_case "$TMP_HOME/p32"
 grep -q '^REVERSE_PORT=2231$' "$TMP_HOME/p32/cfg/config" || { printf '③ 应跳过 config 里登记给 mac 的 2230，实际: %s\n' "$(grep '^REVERSE_PORT=' "$TMP_HOME/p32/cfg/config")" >&2; exit 1; }
 grep -q '跳过端口 2230：已登记给其它设备' "$TMP_HOME/p32/out" || { printf '③ 没有用 config 台账保护别设备的端口\n' >&2; sed 's/^/  /' "$TMP_HOME/p32/out" >&2; exit 1; }
+
+# --- 变量引用与多字节字符的边界 ---
+# macOS 的 /bin/sh 是 bash 3.2：具名变量引用后面紧跟一个汉字时，它会把那个多字节
+# 字符的前几字节吃进变量名 —— set -u 下报 unbound variable（真机踩过：install.sh
+# 的回滚路径整段中断、只回滚了一半），不报时静默输出乱码。位置参数（$1）与特殊
+# 参数（$?）不受影响，但具名变量一律写成 ${name}。
+for _f in "$ROOT/install.sh" "$ROOT/bin/device-harness" "$ROOT/bin/device-tunnel" "$ROOT/tests/smoke.sh"; do
+    if LC_ALL=C grep -q '\$[A-Za-z_][A-Za-z0-9_]*[^ -~]' "$_f" 2>/dev/null; then
+        printf '%s 里有「变量引用紧邻非 ASCII 字符」的写法（macOS bash 3.2 会解析错）：\n' "$_f" >&2
+        LC_ALL=C grep -n '\$[A-Za-z_][A-Za-z0-9_]*[^ -~]' "$_f" | sed 's/^/  /' >&2
+        exit 1
+    fi
+done
 
 printf 'smoke tests passed\n'
