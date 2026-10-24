@@ -158,11 +158,20 @@ READY_FILE=$(mktemp "${TMPDIR:-/tmp}/device-harness.XXXXXX" 2>/dev/null || mktem
 WEB_LOG=$(mktemp "${TMPDIR:-/tmp}/device-harness-web.XXXXXX" 2>/dev/null || mktemp)
 tunnel_pid=
 web_pid=
+web_remote_port=
 
 cleanup() {
     if [ -n "$web_pid" ] && kill -0 "$web_pid" 2>/dev/null; then
         kill "$web_pid" 2>/dev/null || true
         wait "$web_pid" 2>/dev/null || true
+    fi
+    # 兜底：远端那个 trap 万一没跑到（比如 sshd 直接掐了整个会话组），
+    # dsh web 会留在服务器上把端口占着。补一枪按端口精确匹配的 pkill ——
+    # 端口是本次会话独有的，不会误伤别的设备。连不上就算了，别卡住退出流程。
+    if [ -n "${web_remote_port:-}" ]; then
+        ssh -o BatchMode=yes -o ConnectTimeout=5 "$SERVER_HOST_ALIAS" \
+            "pkill -TERM -f 'dsh web.*--host 127.0.0.1 --port $web_remote_port'" \
+            >/dev/null 2>&1 || true
     fi
     if [ -n "$tunnel_pid" ] && kill -0 "$tunnel_pid" 2>/dev/null; then
         kill "$tunnel_pid" 2>/dev/null || true
@@ -271,12 +280,21 @@ run_web_session() {
     fi
 
     # 用户的多余参数放最后：让他的 --trusted-host 之类压过我们的默认值。
+    # dsh web 是服务器上的进程，凭「杀掉本地 ssh」收不干净 —— 实测：ssh 断了之后
+    # node 那个进程还在，端口一直占着（它不听 SIGHUP）。所以远端自己带一个 trap：
+    # 会话收到 HUP/TERM 就把 dsh web 一起带走。本地 ssh 断连 → sshd 给会话发 HUP → 收干净。
+    _web_cmd="cd \"$DIR\" || exit 1
+dsh web --no-open --host 127.0.0.1 --port $remote_port$WEB_EXTRA </dev/null &
+_web_child=\$!
+trap 'kill -TERM \"\$_web_child\" 2>/dev/null' HUP TERM INT EXIT
+wait \"\$_web_child\""
+
     printf '在服务器上启动 dsh web（127.0.0.1:%s），转发到设备 127.0.0.1:%s …\n' "$remote_port" "$local_port"
+    web_remote_port=$remote_port
     : > "$WEB_LOG"
     ssh -o ExitOnForwardFailure=yes -o ServerAliveInterval=60 -o ServerAliveCountMax=3 \
         -L "${local_port}:localhost:${remote_port}" \
-        "$SERVER_HOST_ALIAS" "$ENV_PREFIX cd \"$DIR\" && dsh web --no-open --host 127.0.0.1 --port $remote_port$WEB_EXTRA" \
-        >>"$WEB_LOG" 2>&1 </dev/null &
+        "$SERVER_HOST_ALIAS" "$ENV_PREFIX $_web_cmd" >>"$WEB_LOG" 2>&1 </dev/null &
     web_pid=$!
 
     # 就绪信号照样由服务器说：dsh web 自己打印的那行 `dsh web: <URL>`。
