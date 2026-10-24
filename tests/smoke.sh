@@ -420,6 +420,134 @@ if grep -qF -- '-C "$HOME"' "$TMP_HOME/explicit.log"; then
     exit 1
 fi
 
+# --- device-harness dsh：把服务器的 Web GUI 转到设备的 127.0.0.1 ---
+# dsh 不是终端会话：`dsh web` 起一个只绑 loopback 的网页服务，脚本要
+#   ① 在服务器上挑一个空闲端口给它监听，
+#   ② 用 ssh -L 把设备 127.0.0.1:<同号> 转到那个端口，
+#   ③ 等 dsh web 自己打印 `dsh web: <带凭据的 URL>`（不是等端口），
+#   ④ 把那条 URL 原样交给用户点开。
+WBIN="$TMP_HOME/wbin"
+mkdir -p "$WBIN"
+cat > "$WBIN/ssh" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_SSH_LOG"
+case "$*" in
+    *'ss -ltn'*) printf '%s' "${FAKE_WEB_PORT:-9230}"; exit 0 ;;
+    *'command -v dsh'*) [ "${FAKE_NO_DSH:-0}" = 1 ] && exit 1; exit 0 ;;
+esac
+case "$*" in
+    *'dsh web'*)
+        if [ "${FAKE_DSH_FAIL:-0}" = 1 ]; then printf 'dsh: 起不来\n' >&2; exit 1; fi
+        printf 'dsh web: http://127.0.0.1:%s/?token=SECRET\n' "${FAKE_WEB_PORT:-9230}"
+        exit 0 ;;
+esac
+case "$*" in *'反向隧道已建立'*) printf '✅ 反向隧道已建立\n'; exec sleep 30 ;; esac
+case "$*" in *'-R'*localhost*) exec sleep 30 ;; esac
+exit 0
+EOF
+chmod 755 "$WBIN/ssh"
+# 假 nc：把指定端口当成「设备上已经有人在听」，用来验端口顺位与 URL 改写
+cat > "$WBIN/nc" <<'EOF'
+#!/bin/sh
+case "$3" in "${FAKE_BUSY_PORT:-none}") exit 0 ;; *) exit 1 ;; esac
+EOF
+chmod 755 "$WBIN/nc"
+
+# run_dsh <占用端口|none> <服务器没有 dsh:0|1> <dsh 起不来:0|1> [dsh 参数…]
+# 场景一律走参数、不用前缀赋值：给 shell 函数加的前缀变量会留在当前 shell 里，
+# 上一个场景的开关会渗到下一个场景（真踩过：③ 的 FAKE_NO_DSH 渗进了 ④）。
+run_dsh() {
+    _busy=$1; _no_dsh=$2; _fail_dsh=$3
+    shift 3
+    : > "$TMP_HOME/w.log"
+    env FAKE_SSH_LOG="$TMP_HOME/w.log" TERMUX_VERSION=0.118 \
+        PATH="$TMP_HOME/b9:$WBIN:$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
+        DEVICE_ONBOARD_CONFIG_FILE="$TMP_HOME/p9/config" \
+        DEVICE_ONBOARD_DSH_WEB_PORT=9230 DEVICE_ONBOARD_DSH_WEB_PORT_END=9299 \
+        FAKE_WEB_PORT=9230 FAKE_BUSY_PORT="$_busy" FAKE_NO_DSH="$_no_dsh" FAKE_DSH_FAIL="$_fail_dsh" \
+        sh "$TMP_HOME/b9/device-harness" dsh "$@" > "$TMP_HOME/w.out" 2>&1
+}
+
+# ① 正常路径：同号转发、URL 原样给用户、反向隧道照旧在场
+run_dsh none 0 0 || {
+    printf 'device-harness dsh 正常路径失败：\n' >&2
+    sed 's/^/  /' "$TMP_HOME/w.out" >&2
+    exit 1
+}
+grep -q -- '-L 9230:localhost:9230' "$TMP_HOME/w.log" || {
+    printf '没把 dsh web 的端口本地转发到设备（应有 -L 9230:localhost:9230）：\n' >&2
+    sed 's/^/  /' "$TMP_HOME/w.log" >&2
+    exit 1
+}
+grep -q -- 'dsh web --no-open --host 127.0.0.1 --port 9230' "$TMP_HOME/w.log" || {
+    printf '没在服务器上按预期启动 dsh web：\n' >&2
+    sed 's/^/  /' "$TMP_HOME/w.log" >&2
+    exit 1
+}
+grep -q 'http://127.0.0.1:9230/?token=SECRET' "$TMP_HOME/w.out" || {
+    printf '没把 dsh web 打印的 URL 交给用户：\n' >&2
+    sed 's/^/  /' "$TMP_HOME/w.out" >&2
+    exit 1
+}
+grep -q 'dsh web 已就绪' "$TMP_HOME/w.out" || { printf '没有就绪提示\n' >&2; exit 1; }
+grep -q "DEVICE_ONBOARD_ID='xiaomitest'" "$TMP_HOME/w.log" || {
+    printf 'dsh 会话没带上设备身份（DEVICE_ONBOARD_ID）\n' >&2
+    exit 1
+}
+grep -q '反向隧道已建立' "$TMP_HOME/w.log" || {
+    printf 'dsh 模式没有再起反向隧道（agent 就 ssh 不回设备了）\n' >&2
+    exit 1
+}
+# 端口由本命令统一分配：别让人传 --port 把它和 -L 弄错开
+if run_dsh none 0 0 --port 9999; then
+    printf 'device-harness dsh --port 没有被拒绝\n' >&2
+    exit 1
+fi
+grep -q '别传 --port' "$TMP_HOME/w.out" || {
+    printf '拒绝 --port 时没说清原因：\n' >&2
+    sed 's/^/  /' "$TMP_HOME/w.out" >&2
+    exit 1
+}
+
+# ② 设备上同号端口被占：顺位到 9231，并把 URL 里的端口改掉
+run_dsh 9230 0 0 || {
+    printf 'device-harness dsh 端口顺位失败：\n' >&2
+    sed 's/^/  /' "$TMP_HOME/w.out" >&2
+    exit 1
+}
+grep -q -- '-L 9231:localhost:9230' "$TMP_HOME/w.log" || {
+    printf '设备端口被占时没有顺位到 9231：\n' >&2
+    sed 's/^/  /' "$TMP_HOME/w.log" >&2
+    exit 1
+}
+grep -q 'http://127.0.0.1:9231/?token=SECRET' "$TMP_HOME/w.out" || {
+    printf 'URL 里的端口没跟着改（用户点开就是 404/连不上）：\n' >&2
+    sed 's/^/  /' "$TMP_HOME/w.out" >&2
+    exit 1
+}
+
+# ③ 服务器上没有 dsh：直接说清楚
+if run_dsh none 1 0; then
+    printf '服务器没有 dsh 时竟然还往下跑了\n' >&2
+    exit 1
+fi
+grep -q '服务器上找不到 dsh' "$TMP_HOME/w.out" || {
+    printf '没提示服务器缺 dsh：\n' >&2
+    sed 's/^/  /' "$TMP_HOME/w.out" >&2
+    exit 1
+}
+
+# ④ dsh web 起来就挂了：把它的输出摊给用户，别只说「失败」
+if run_dsh none 0 1; then
+    printf 'dsh web 挂掉时竟然算成功\n' >&2
+    exit 1
+fi
+grep -q 'dsh: 起不来' "$TMP_HOME/w.out" || {
+    printf 'dsh web 失败时没把它的输出给用户：\n' >&2
+    sed 's/^/  /' "$TMP_HOME/w.out" >&2
+    exit 1
+}
+
 # --- 中途失败必须自动回滚：只撤本次改动，别碰别人的配置 ---
 # 用假 ssh 让「写服务器 ~/.ssh/config」这一步返回非 0，流程应当在
 # 写完本地配置后就地失败，并由 EXIT trap 把本次新增的东西全部撤回。

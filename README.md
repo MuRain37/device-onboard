@@ -91,9 +91,28 @@ sh install.sh
 device-harness                      # 一键：起隧道 + 在服务器上跑 codex
 device-harness claude               # 换别的 harness
 device-harness -C '~/项目' claude   # 指定服务器上的工作目录
+device-harness dsh                  # 起服务器上的 dsh web，在设备浏览器里用
 device-tunnel                       # 只起反向隧道，前台保持，Ctrl-C 结束
 ssh server                          # 进服务器普通 shell
 ```
+
+### 用 dsh（DeepSeek Harness）：在设备浏览器里打开服务器的 Web GUI
+
+```sh
+device-harness dsh
+```
+
+```
+✅ dsh web 已就绪。在设备浏览器里打开：
+
+    http://127.0.0.1:9230/?token=…
+
+   这条 URL 带着一次性凭据，别外发。Ctrl-C 结束（dsh web 与隧道一起收）。
+```
+
+背后发生的事：`dsh web` 只监听服务器的 loopback，所以脚本**挑一个服务器上空闲的端口**起它，再用 `ssh -L` 把设备 `127.0.0.1:<同一个号>` 转发过去 —— 于是那条 URL 在设备上原样点开就行，不用改 host、不用开防火墙、也不至于把 Web GUI 暴露在公网。设备上那个端口要是被占了（比如你本机也开着 dsh），脚本会顺位换号并把 URL 里的端口改好再给你。
+
+反向隧道照旧一起起：dsh 里那个 agent 仍然可以 `ssh onboard-device-<名字>` 回到设备上干活。
 
 ## 命令速查
 
@@ -103,6 +122,7 @@ ssh server                          # 进服务器普通 shell
 | 重新安装本地命令 | 设备 | `sh install.sh`（检测到已有配置就跳过接入） |
 | 重写配置块（不重新接入） | 设备 | `sh install.sh --repair` |
 | 一键干活 | 设备 | `device-harness [-C <服务器目录>] [harness] [参数…]` |
+| 在设备浏览器里用 dsh | 设备 | `device-harness dsh`（自动转发 dsh web 的端口） |
 | 只开反向隧道 | 设备 | `device-tunnel` |
 | 进服务器 | 设备 | `ssh server` |
 | 从服务器操作设备 | 服务器 | `ssh onboard-device-<名字> '<命令>'` |
@@ -129,6 +149,9 @@ ssh server                          # 进服务器普通 shell
 
 **⑥ 只改自己带标记的区块。**
 所有对 `~/.ssh/config`、`~/.codex/AGENTS.md`、`~/.claude/CLAUDE.md` 的写入都限制在 `BEGIN` / `END` 标记之间，改前备份，标记外的手写内容一律不动。首次接入半路失败会按标记撤销、还原备份。
+
+**⑦ dsh 是网页，不是终端 —— 走本地转发，且就绪信号仍然是「服务器说的」。**
+`dsh web` 只绑 loopback（连 `--host 0.0.0.0` 都不支持），所以「在设备上打开」天然就是 `ssh -L` 的活：两边用同一个端口号，它打印的那条 URL 才能在设备上原样点开（它还会校验 Host 必须是 loopback —— 转发之后仍是 `127.0.0.1`，正好满足）。就绪判据也没换样：等 `dsh web` 自己那行 `dsh web: <URL>`，不等端口；没打出这行就是没起来，把它的输出摊给你看。
 
 ## 装了 / 写了哪些东西
 
@@ -166,6 +189,13 @@ ssh server                          # 进服务器普通 shell
 | `DEVICE_ONBOARD_REVERSE_PORT_START` / `_END` | `2230` / `2299` | 反向端口范围（避开手工占用的低位端口） |
 | `DEVICE_ONBOARD_AGENTS_MD` | `1` | 设为 `0` 跳过服务器 `~/.codex/AGENTS.md` 的标记块 |
 | `DEVICE_ONBOARD_CLAUDE_MD` | `1` | 设为 `0` 跳过服务器 `~/.claude/CLAUDE.md` 的标记块 |
+
+`device-harness dsh` 另有两个（在设备上跑命令时用）：
+
+| 变量 | 默认 | 作用 |
+|---|---|---|
+| `DEVICE_ONBOARD_DSH_WEB_PORT` / `_END` | `9230` / `9299` | 给 `dsh web` 挑端口的范围（设备侧被占时顺位） |
+| `DEVICE_ONBOARD_DSH_WAIT` | `180` | 等 `dsh web` 打印 URL 的秒数 |
 
 ## 测试
 

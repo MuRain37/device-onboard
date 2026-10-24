@@ -168,6 +168,42 @@ flowchart TD
     J --> K["EXIT trap 收掉隧道"]
 ```
 
+### 4.1 `device-harness dsh`：网页 harness 走另一条路
+
+`dsh` 不是终端会话：`dsh web` 起一个只绑 loopback 的 Web GUI。所以它不进上面那条
+`ssh -t` 分支，而是多走一步**本地转发**（`-L`），就绪判据仍然是「服务器自己说的」。
+
+```mermaid
+flowchart TD
+    A["device-harness dsh"] --> B["后台起 device-tunnel<br/>（反向通道照旧：agent 要能回连设备）"]
+    B --> C{"隧道就绪？"}
+    C -- 否 --> C1["打印隧道输出并退出"]
+    C -- 是 --> D["服务器上有 dsh 吗"]
+    D -- 没有 --> D1["报错：先在服务器上装 DeepSeek Harness"]
+    D -- 有 --> E["服务器上挑一个空闲端口<br/>ss -ltn 从 9230 起扫"]
+    E --> F{"设备上同号端口空着吗<br/>nc -z"}
+    F -- 空着 --> G["-L 同号:localhost:同号"]
+    F -- 被占 --> G1["-L 顺位:localhost:原号<br/>URL 里的端口稍后改写"]
+    G --> H["ssh -L … server<br/>export DEVICE_ONBOARD_*; dsh web --no-open --host 127.0.0.1 --port P"]
+    G1 --> H
+    H --> I{"日志里出现<br/>「dsh web: <URL>」了吗"}
+    I -- 否/进程死了 --> I1["把 dsh web 的输出摊出来并退出"]
+    I -- 出现 --> J["把 URL 打印给用户<br/>（改了端口就改写后再打印）"]
+    J --> K["前台等 dsh web 退出"]
+    K --> L["EXIT trap 收掉 dsh web 与隧道"]
+```
+
+要点：
+
+| 问题 | 做法 | 为什么 |
+|---|---|---|
+| 网页怎么到设备上 | `ssh -L <设备端口>:localhost:<服务器端口>` | `dsh web` 只绑 loopback，`--host 0.0.0.0` 明确不支持；转发之后 Host 仍是 `127.0.0.1`，它的浏览器请求校验照旧通过 |
+| 两边端口号 | 默认同一个号 | dsh 打印的 URL 里带的端口和你点开的端口一致，才不用手改 |
+| 设备端口被占 | 顺位 + 改写 URL 里的端口 | 否则 URL 指到一个没人听的端口上 |
+| 就绪判据 | 等 `dsh web: <URL>` 那行 | 与 §3 同一个原则：服务器亲口说的才算；端口在听不算 |
+| 用户传 `--port` | 直接拒绝 | 会让 dsh 的监听端口和 `-L` 的目标端口错开，症状是「网页打不开」，没有任何报错指向端口 |
+| 生命周期 | 隧道 + dsh web 都挂在同一个 EXIT trap 上 | 与前一条 harness 同一原则 |
+
 ## 5. 工作目录是怎么定的
 
 | 情况 | 工作目录 | 说明 |
@@ -247,5 +283,6 @@ flowchart TD
 | 只开隧道 | 设备 | `device-tunnel` |
 | 一键干活（默认服务器家目录） | 设备 | `device-harness` |
 | 一键干活（指定服务器目录） | 设备 | `device-harness -C '~/项目'` |
+| 在设备浏览器里用 dsh | 设备 | `device-harness dsh`（自动转发 dsh web 的端口） |
 | 进服务器 | 设备 | `ssh server` |
 | 从服务器操作设备 | 服务器 | `ssh onboard-device-<设备名> '<命令>'` |

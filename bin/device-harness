@@ -7,6 +7,8 @@
 #   device-harness claude             换别的 harness —— 第一个参数是什么就起什么
 #   device-harness -C '~/proj' claude 先给工作目录，再给 harness 命令
 #   device-harness claude -p '活'     命令后面的参数原样传给 harness
+#   device-harness dsh                起服务器上的 `dsh web`，并把那个网页转到设备的 127.0.0.1
+#                                     （dsh 是网页 GUI，不是终端会话 —— 见 run_web_session）
 #
 # 分成两个命令不行就在于「生命期」：隧道是后台长跑，harness 是前台交互，
 # 中间断了谁都发现不了。这里把它们绑一起，退出时一定收干净。
@@ -63,6 +65,14 @@ if [ "$#" -gt 0 ]; then
     shift
 fi
 
+# dsh 是「在浏览器里用」的 harness：`dsh web` 起的是一个只绑 loopback 的 Web GUI，
+# 不是一个交互式终端会话。所以它的编排跟 codex/claude 完全不同 —— 见 run_web_session：
+# 服务器上起 dsh web，再用 SSH 本地转发把它搬到设备的 127.0.0.1 上。
+WEB_MODE=0
+case "$HARNESS_CMD" in
+    dsh) WEB_MODE=1 ;;
+esac
+
 # 交互式 Codex 把「执行工具命令」交给常驻的 app-server 守护进程，继承的是守护进程
 # 启动那一刻的环境 —— 所以 ssh 带过去的 DEVICE_ONBOARD_* 到不了它的工具手上
 # （实测：工具 shell 里的 SSH_CLIENT 与两天前的守护进程逐字一致）。
@@ -74,10 +84,14 @@ esac
 
 # codex 用它自己的 -C 指定工作目录；别的命令就 cd 过去再跑。
 # 用双引号：这样 $DIR 里若是 ${HOME}，交给远端 shell 去展开。
-case "$HARNESS_CMD" in
-    codex*) RUN_CMD="$HARNESS_CMD -C \"$DIR\"" ;;
-    *)      RUN_CMD="cd \"$DIR\" && $HARNESS_CMD" ;;
-esac
+# WEB_MODE（dsh）走另一条路：它的服务器端命令要等端口定下来才拼，见 run_web_session。
+RUN_CMD=
+if [ "$WEB_MODE" = 0 ]; then
+    case "$HARNESS_CMD" in
+        codex*) RUN_CMD="$HARNESS_CMD -C \"$DIR\"" ;;
+        *)      RUN_CMD="cd \"$DIR\" && $HARNESS_CMD" ;;
+    esac
+fi
 
 # 单引号转义：' -> '\''
 # 两处要用：① harness 的剩余参数（可能带空格，例如 -p '一段话'）
@@ -89,8 +103,23 @@ squote() {
 
 # 剩余参数原样传给 harness：逐个转义后再拼，带空格/引号的参数才不会被拆散
 # （实测过：不转义时 `-p 'two words here'` 到远端会变成 4 个参数）。
+WEB_EXTRA=
 for _arg in "$@"; do
-    RUN_CMD="$RUN_CMD $(squote "$_arg")"
+    if [ "$WEB_MODE" = 0 ]; then
+        RUN_CMD="$RUN_CMD $(squote "$_arg")"
+        continue
+    fi
+    # 端口由本命令统一分配：服务器上 dsh web 的监听端口和设备侧 -L 的目标端口
+    # 必须是同一个号。用户自己传 --port 会让两者错开，症状是「网页打不开」而
+    # 没有任何报错指向端口 —— 所以直接拒绝，并说清该改哪儿。
+    case "$_arg" in
+        --port|--port=*|-p)
+            printf '错误：dsh 的端口由 device-harness 统一分配，别传 --port / -p。\n' >&2
+            printf '      要换起点：DEVICE_ONBOARD_DSH_WEB_PORT=9300 device-harness dsh\n' >&2
+            exit 2
+            ;;
+    esac
+    WEB_EXTRA="$WEB_EXTRA $(squote "$_arg")"
 done
 
 # ---------- 设备侧当前目录：作为「上下文」带给服务器上的 harness ----------
@@ -126,15 +155,21 @@ fi
 # 那是服务器亲口说的（device-tunnel 带 -o ExitOnForwardFailure=yes：转发真绑上才会执行到那行）。
 # Termux 上 /tmp 不可写，临时文件必须用 ${TMPDIR}。
 READY_FILE=$(mktemp "${TMPDIR:-/tmp}/device-harness.XXXXXX" 2>/dev/null || mktemp)
+WEB_LOG=$(mktemp "${TMPDIR:-/tmp}/device-harness-web.XXXXXX" 2>/dev/null || mktemp)
 tunnel_pid=
+web_pid=
 
 cleanup() {
+    if [ -n "$web_pid" ] && kill -0 "$web_pid" 2>/dev/null; then
+        kill "$web_pid" 2>/dev/null || true
+        wait "$web_pid" 2>/dev/null || true
+    fi
     if [ -n "$tunnel_pid" ] && kill -0 "$tunnel_pid" 2>/dev/null; then
         kill "$tunnel_pid" 2>/dev/null || true
         wait "$tunnel_pid" 2>/dev/null || true
         printf '\n隧道已收起。\n'
     fi
-    [ -f "$READY_FILE" ] && rm -f "$READY_FILE"
+    rm -f "$READY_FILE" "$WEB_LOG" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
@@ -160,7 +195,11 @@ if ! grep -q '反向隧道已建立' "$READY_FILE" 2>/dev/null; then
     exit 1
 fi
 
-printf '隧道就绪。在服务器上启动 %s（退出后隧道自动收起）…\n\n' "$HARNESS_CMD"
+if [ "$WEB_MODE" = 1 ]; then
+    printf '隧道就绪。在服务器上启动 dsh web（Ctrl-C 结束，dsh web 与隧道一起收）…\n\n'
+else
+    printf '隧道就绪。在服务器上启动 %s（退出后隧道自动收起）…\n\n' "$HARNESS_CMD"
+fi
 
 # 把「本次会话来自哪台设备」和「设备侧当时在哪个目录」交给 harness。变量名和用法写在
 # 服务器上那份设备档案 + ~/.codex/AGENTS.md 里 —— 会话一开始就能看到。
@@ -170,4 +209,117 @@ printf '隧道就绪。在服务器上启动 %s（退出后隧道自动收起）
 # special builtin，赋值不留在 shell 里）→ cd 之后的命令根本看不到这几个变量。
 # 真机踩过：device-harness sh -c 'env | grep DEVICE_ONBOARD' 一行都打不出来。
 ENV_PREFIX="export DEVICE_ONBOARD_ID=$(squote "$DEVICE_ID") DEVICE_ONBOARD_DEVICE_ALIAS=$(squote "$DEVICE_HOST_ALIAS") DEVICE_ONBOARD_DEVICE_CWD=$(squote "$DEVICE_CWD") DEVICE_ONBOARD_DEVICE_CWD_REL=$(squote "$DEVICE_CWD_REL");"
+
+# ---------- dsh：把服务器的 Web GUI 搬到设备的 127.0.0.1 ----------
+# dsh web 只绑 loopback（`--host 0.0.0.0` 明确不支持），所以「在设备上打开网页」
+# 天然就是 SSH 本地转发该干的活：设备 127.0.0.1:<端口> → 服务器 127.0.0.1:<端口>。
+# 两边取同一个端口号，dsh 打印的那条带凭据的 URL 就能在设备上原样点开 ——
+# 它的浏览器请求校验要求 Host 是 loopback，转发之后 Host 仍是 127.0.0.1，照样通过。
+WEB_PORT_START=${DEVICE_ONBOARD_DSH_WEB_PORT:-9230}
+WEB_PORT_END=${DEVICE_ONBOARD_DSH_WEB_PORT_END:-9299}
+WEB_WAIT=${DEVICE_ONBOARD_DSH_WAIT:-180}
+
+# 服务器上有没有 dsh：没有就说清楚，别让人对着 ssh 的退出码猜。
+server_has_dsh() {
+    ssh "$SERVER_HOST_ALIAS" 'command -v dsh >/dev/null 2>&1 || [ -x "$HOME/.local/bin/dsh" ]' 2>/dev/null
+}
+
+# 服务器侧挑端口：dsh web 要在这个端口上监听 loopback。
+# 没有 ss 的命令就按「没人听」处理 —— 真撞了 dsh 会自己报 EADDRINUSE，报错照样看得见。
+server_free_web_port() {
+    _script=$(printf 'p=%s; end=%s; while [ "$p" -le "$end" ]; do if [ -z "$(ss -ltn "sport = :$p" 2>/dev/null | tail -n +2)" ]; then printf "%%s" "$p"; exit 0; fi; p=$((p+1)); done; exit 1' "$WEB_PORT_START" "$WEB_PORT_END")
+    ssh "$SERVER_HOST_ALIAS" "$_script" 2>/dev/null
+}
+
+# 设备侧挑端口：要保证 -L 能在本机 127.0.0.1 上绑得上。有 nc 就问一句，
+# 没有就当作空闲（真绑不上时 ssh 会明确报 "cannot listen to port"，不会静默）。
+device_port_free() {
+    if command -v nc >/dev/null 2>&1; then
+        ! nc -z 127.0.0.1 "$1" >/dev/null 2>&1
+    else
+        return 0
+    fi
+}
+
+run_web_session() {
+    case "$WEB_PORT_START" in ''|*[!0-9]*) printf '错误：DEVICE_ONBOARD_DSH_WEB_PORT 不是数字：%s\n' "$WEB_PORT_START" >&2; return 1 ;; esac
+    case "$WEB_PORT_END"   in ''|*[!0-9]*) printf '错误：DEVICE_ONBOARD_DSH_WEB_PORT_END 不是数字：%s\n' "$WEB_PORT_END" >&2; return 1 ;; esac
+
+    if ! server_has_dsh; then
+        printf '服务器上找不到 dsh 命令 —— 先在服务器上把 DeepSeek Harness 装好。\n' >&2
+        return 1
+    fi
+
+    remote_port=$(server_free_web_port || true)
+    case "$remote_port" in
+        ''|*[!0-9]*)
+            printf '服务器上 %s-%s 里没有空闲端口能给 dsh web。\n' "$WEB_PORT_START" "$WEB_PORT_END" >&2
+            return 1
+            ;;
+    esac
+
+    # 优先用同一个号（URL 一个字都不用改）；设备上被占才顺位，并把 URL 里的端口改掉。
+    local_port=
+    _p=$remote_port
+    while [ "$_p" -le "$WEB_PORT_END" ]; do
+        if device_port_free "$_p"; then local_port=$_p; break; fi
+        _p=$((_p + 1))
+    done
+    if [ -z "$local_port" ]; then
+        printf '设备上 %s-%s 都占着，没有端口可以转发 dsh web。\n' "$remote_port" "$WEB_PORT_END" >&2
+        return 1
+    fi
+
+    # 用户的多余参数放最后：让他的 --trusted-host 之类压过我们的默认值。
+    printf '在服务器上启动 dsh web（127.0.0.1:%s），转发到设备 127.0.0.1:%s …\n' "$remote_port" "$local_port"
+    : > "$WEB_LOG"
+    ssh -o ExitOnForwardFailure=yes -o ServerAliveInterval=60 -o ServerAliveCountMax=3 \
+        -L "${local_port}:localhost:${remote_port}" \
+        "$SERVER_HOST_ALIAS" "$ENV_PREFIX cd \"$DIR\" && dsh web --no-open --host 127.0.0.1 --port $remote_port$WEB_EXTRA" \
+        >>"$WEB_LOG" 2>&1 </dev/null &
+    web_pid=$!
+
+    # 就绪信号照样由服务器说：dsh web 自己打印的那行 `dsh web: <URL>`。
+    # 不等端口、也不信「我发出去了」—— 没打出这行就是没起来。
+    _waited=0
+    _url=
+    while [ "$_waited" -lt "$WEB_WAIT" ]; do
+        _url=$(sed -n 's/^dsh web: //p' "$WEB_LOG" 2>/dev/null | tail -1)
+        [ -n "$_url" ] && break
+        if ! kill -0 "$web_pid" 2>/dev/null; then
+            printf 'dsh web 退出了，没打出 URL。输出：\n' >&2
+            sed 's/^/    /' "$WEB_LOG" >&2
+            web_pid=
+            return 1
+        fi
+        sleep 1
+        _waited=$((_waited + 1))
+    done
+    if [ -z "$_url" ]; then
+        printf '等了 %s 秒没等到 dsh web 打印 URL。最后几行输出：\n' "$_waited" >&2
+        tail -5 "$WEB_LOG" | sed 's/^/    /' >&2
+        return 1
+    fi
+
+    # 端口被占换过号时，URL 里的端口得跟着换；Host 仍是 127.0.0.1，dsh 的校验照旧通过。
+    _device_url=$_url
+    if [ "$local_port" != "$remote_port" ]; then
+        _device_url=$(printf '%s\n' "$_url" | sed "s|:$remote_port|:$local_port|")
+        printf '\n注意：设备上 %s 已被占用，改用 %s（URL 里的端口已替你改好）。\n' "$remote_port" "$local_port"
+    fi
+
+    printf '\n✅ dsh web 已就绪。在设备浏览器里打开：\n\n    %s\n\n' "$_device_url"
+    printf '   这条 URL 带着一次性凭据，别外发。Ctrl-C 结束（dsh web 与隧道一起收）。\n\n'
+
+    wait "$web_pid" 2>/dev/null || true
+    web_pid=
+    printf '\ndsh web 已退出。最后几行输出：\n'
+    tail -5 "$WEB_LOG" 2>/dev/null | sed 's/^/    /' || true
+}
+
+if [ "$WEB_MODE" = 1 ]; then
+    run_web_session
+    exit $?
+fi
+
 ssh -t "$SERVER_HOST_ALIAS" "$ENV_PREFIX $RUN_CMD"
