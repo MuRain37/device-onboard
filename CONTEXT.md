@@ -16,7 +16,7 @@ _Avoid_: 客户端安装多个 harness
 **反向通道**：设备主动建立的 SSH 反向转发，使服务器可以通过本地端口连接回设备。
 _Avoid_: 服务器主动直连设备（在 NAT 场景下通常不成立）
 
-**设备档案**：服务器 `~/.agents/skills/device-onboard/SKILL.md` 中记录设备名称、地址、端口和密钥引用的登记信息。
+**设备档案**：服务器 `~/.codex/skills/device-onboard/SKILL.md` 中记录设备名称、地址、端口和密钥引用的登记信息。
 _Avoid_: 在线状态（在线状态是运行时事实，不是稳定档案）
 
 ## 范围

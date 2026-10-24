@@ -7,5 +7,27 @@ if [ ! -f "$CONFIG_FILE" ]; then
 fi
 . "$CONFIG_FILE"
 : "${TUNNEL_HOST_ALIAS:?配置缺少 TUNNEL_HOST_ALIAS}"
+
+# Termux（Android）会在后台回收进程；隧道必须持有唤醒锁，否则会被系统掐断。
+if [ -n "${TERMUX_VERSION:-}" ]; then
+    command -v termux-wake-lock >/dev/null 2>&1 && termux-wake-lock >/dev/null 2>&1 || true
+    # 本机 sshd 是这条隧道的「被访问端」。隧道是设备主动往外连的，sshd 没跑也照样连得上，
+    # 结果是服务器那边端口看着在听、里面却是空壳：连进来直接被 reset
+    # （真机症状：kex_exchange_identification: read: Connection reset by peer）。
+    # 所以起隧道前先确认本机 sshd 在跑。
+    if command -v sshd >/dev/null 2>&1 && ! pgrep -x sshd >/dev/null 2>&1; then
+        printf '本机 sshd 没在跑，先拉起来…\n'
+        sshd >/dev/null 2>&1 || true
+        sleep 1
+    fi
+fi
+
 printf '正在建立反向 SSH 隧道；保持此窗口，按 Ctrl-C 结束。\n'
-exec ssh -N "$TUNNEL_HOST_ALIAS"
+# 不用 -N：改成让服务器端跑一个「只负责报喜、然后挂住保持连接」的命令。
+# 通道的 Host 块里有 ExitOnForwardFailure yes —— 转发真绑上了才会执行到那几行，
+# 所以这句「已建立」是服务器亲口说的，不是本地瞎报。
+exec ssh "$TUNNEL_HOST_ALIAS" "\
+printf '✅ 反向隧道已建立\n'; \
+printf '   服务器 127.0.0.1:${REVERSE_PORT}  →  本机 localhost:${DEVICE_PORT}\n'; \
+printf '   断开：Ctrl-C\n'; \
+exec sleep 2147483647"

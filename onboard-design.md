@@ -3,13 +3,13 @@
 > 用途：作为设备接入工具的方案讨论稿，可交给任意 harness 或人工评审继续打磨。  
 > 状态：**MVP 方案已收敛，尚未实现**。
 > 当前边界：首版只支持 macOS；首次运行 `install.sh` 会安装本地命令并直接进入设备接入；服务器是唯一 AI/harness 节点；多设备协同暂不纳入首版。
-> 已确认：接入命令维护双方的 `~/.ssh/config`；设备侧提供服务器连接 Host 和反向隧道 Host；`device-tunnel` 前台启动反向 SSH；`server-harness <命令>` 通过 SSH 启动服务器上的 Harness。
+> 已确认：接入命令维护双方的 `~/.ssh/config`；设备侧提供服务器连接 Host 和反向隧道 Host；`device-tunnel` 前台启动反向 SSH；用 `ssh onboard-server-<设备名> <命令>` 在服务器上启动 Harness，`device-harness` 则是一键编排（隧道 + Harness 同生共死）。
 
 ---
 
 ## 一句话目标
 
-在一台 macOS 设备上运行 `install.sh`，脚本安装本地命令并完成首次 SSH 密钥交换和配置；日常用 `device-tunnel` 手动启动服务器到设备的反向通道，用 `server-harness <命令>` 启动服务器上的 Harness。服务器集中运行 Harness，设备档案记录在 `~/.agents/skills/device-onboard/SKILL.md`。
+在一台 macOS 设备上运行 `install.sh`，脚本安装本地命令并完成首次 SSH 密钥交换和配置；日常用 `device-tunnel` 手动启动服务器到设备的反向通道，用 `ssh onboard-server-<设备名> <命令>` 在服务器上启动 Harness（想一步到位就用 `device-harness`，隧道与 Harness 同生共死）。服务器集中运行 Harness，设备档案记录在 `~/.agents/skills/device-onboard/SKILL.md`。
 
 ---
 
@@ -69,8 +69,11 @@
 [日常] device-tunnel
   前台启动反向隧道，Ctrl-C 结束
 
-[日常] server-harness codex
+[日常] ssh onboard-server-<设备名> codex
   通过 SSH 在服务器启动 Harness
+
+[日常] device-harness codex
+  一键：起反向隧道 + 在服务器上跑 Harness（同生共死）
 
 [日常] ssh onboard-server-<设备名>
   进入普通服务器 shell
@@ -87,7 +90,7 @@
 - **不共享服务器**：这套设计绑定"自己有一台服务器"，不是通用工具。
 - **服务器是 AI 中心节点**：harness、skills 和项目环境集中在服务器，设备侧不重复安装 harness。
 - **harness 通过命令配置**：首版不内置 Codex、Claude Code 等具体适配器，由用户配置启动命令。
-- **Harness 使用独立命令启动**：`server-harness <命令>` 通过普通服务器 Host 执行远程 Harness 命令；不为每个 Harness 生成 SSH Host。
+- **Harness 通过普通 SSH 别名启动**：用 `ssh onboard-server-<设备名> <命令>` 在服务器执行远程 Harness 命令；不为每个 Harness 生成 SSH Host。需要自动起隧道时用 `device-harness`，它把隧道与 Harness 绑成同生共死的一键流程。
 - **多设备协同暂不属于首版范围**：不设计共享工作区、任务分发或自动合并。
 - **平台差异要单独处理**：Linux / macOS / Termux 的 sshd、自启方式、路径都不同（Termux 的 sshd 在 8022，且需要唤醒锁保活）。
 - **不存私钥进 skill**。
