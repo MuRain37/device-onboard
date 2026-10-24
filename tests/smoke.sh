@@ -1006,25 +1006,25 @@ exit 0
 EOF
 chmod 755 "$UBIN/ssh"
 
-# 装一遍：$1 = 设备 HOME；服务器 HOME 固定为 <设备 HOME>-server
+# install_into <设备 HOME> [设备名] [服务器 HOME] [反向端口上界]
+# 服务器 HOME 默认是 <设备 HOME>-server；两台设备共用一台服务器时显式传同一个。
 install_into() {
-    _h=$1
-    _s="$_h-server"
+    _h=$1; _name=${2:-xiaomitest}; _s=${3:-"$1-server"}; _pend=${4:-2230}
     mkdir -p "$_h/.ssh" "$_s/.ssh"
     # 块外预置一条用户手写的 Host keepme：卸载不该碰它
     printf 'Host keepme\n    HostName example.com\n' > "$_h/.ssh/config"
-    printf '1\nxiaomitest\n134.175.91.169\nubuntu\n22\n' | \
+    printf '1\n%s\n134.175.91.169\nubuntu\n22\n' "$_name" | \
         env FAKE_SSH_LOG="$_h/ssh.log" FAKE_SERVER_HOME="$_s" TERMUX_VERSION=0.118 PATH="$UBIN:$PATH" HOME="$_h" \
-        DEVICE_ONBOARD_REVERSE_PORT_START=2230 DEVICE_ONBOARD_REVERSE_PORT_END=2230 \
+        DEVICE_ONBOARD_REVERSE_PORT_START=2230 DEVICE_ONBOARD_REVERSE_PORT_END="$_pend" \
         DEVICE_ONBOARD_CONFIG_DIR="$_h/cfg" DEVICE_ONBOARD_KEY_DIR="$_h/keys" DEVICE_ONBOARD_BIN_DIR="$_h/bin" \
         sh "$ROOT/install.sh" > "$_h/out" 2>&1
 }
 
-# 卸载：$1 = 设备 HOME，其余参数原样传给 device-uninstall
+# uninstall_from <设备 HOME> <服务器 HOME> [device-uninstall 参数…]
 uninstall_from() {
-    _h=$1
-    shift
-    env FAKE_SSH_LOG="$_h/ssh.log" FAKE_SERVER_HOME="$_h-server" PATH="$UBIN:$PATH" HOME="$_h" \
+    _h=$1; _s=$2
+    shift 2
+    env FAKE_SSH_LOG="$_h/ssh.log" FAKE_SERVER_HOME="$_s" PATH="$UBIN:$PATH" HOME="$_h" \
         DEVICE_ONBOARD_CONFIG_DIR="$_h/cfg" DEVICE_ONBOARD_KEY_DIR="$_h/keys" \
         sh "$ROOT/bin/device-uninstall" "$@" > "$_h/un.out" 2>&1
 }
@@ -1044,7 +1044,7 @@ grep -q 'device-onboard:xiaomitest' "$U1/.ssh/authorized_keys" || { printf '前�
 [ -f "$U1-server/.codex/skills/device-onboard/SKILL.md" ] || { printf '前置安装没在服务器侧写设备档案\n' >&2; exit 1; }
 grep -q 'Host onboard-device-xiaomitest' "$U1-server/.ssh/config" || { printf '前置安装没在服务器侧写回连 Host\n' >&2; exit 1; }
 
-uninstall_from "$U1" || {
+uninstall_from "$U1" "$U1-server" || {
     printf 'device-uninstall 失败：\n' >&2
     sed 's/^/  /' "$U1/un.out" >&2
     exit 1
@@ -1089,7 +1089,7 @@ fi
 U2="$TMP_HOME/u2"
 install_into "$U2" || { printf '--keep-keys 用例的前置安装失败：\n' >&2; sed 's/^/  /' "$U2/out" >&2; exit 1; }
 key_before=$(cksum "$U2/keys/xiaomitest-device" | awk '{print $1}')
-uninstall_from "$U2" --keep-keys || {
+uninstall_from "$U2" "$U2-server" --keep-keys || {
     printf 'device-uninstall --keep-keys 失败：\n' >&2
     sed 's/^/  /' "$U2/un.out" >&2
     exit 1
@@ -1145,7 +1145,7 @@ grep -q '^BIN_DIR=' "$U3/cfg/config" || { printf '状态文件没记 BIN_DIR（�
 U4="$TMP_HOME/u4"
 install_into "$U4" || { printf '缺状态文件用例的前置安装失败：\n' >&2; sed 's/^/  /' "$U4/out" >&2; exit 1; }
 rm -f "$U4/cfg/config"
-uninstall_from "$U4" || {
+uninstall_from "$U4" "$U4-server" || {
     printf '没有状态文件时卸载失败了：\n' >&2
     sed 's/^/  /' "$U4/un.out" >&2
     exit 1
@@ -1158,6 +1158,34 @@ if grep -q 'device-onboard' "$U4/.ssh/config"; then
     exit 1
 fi
 grep -qx 'Host keepme' "$U4/.ssh/config" || { printf '兜底清理顺手删了用户的 Host keepme\n' >&2; exit 1; }
+
+# ⑤ 一台服务器上登记了两台设备：卸掉一台，别把两边共用的提示块也带走
+# 记忆文件里的「设备会话」块不分设备，撤一台就得看还有没有别的设备在用它。
+T1="$TMP_HOME/t1"; T2="$TMP_HOME/t2"; TS="$TMP_HOME/tsrv"
+mkdir -p "$TS/.ssh"
+install_into "$T1" devicea "$TS" 2231 || { printf '两台设备用例：第一台安装失败：\n' >&2; sed 's/^/  /' "$T1/out" >&2; exit 1; }
+install_into "$T2" deviceb "$TS" 2231 || { printf '两台设备用例：第二台安装失败：\n' >&2; sed 's/^/  /' "$T2/out" >&2; exit 1; }
+SKF="$TS/.codex/skills/device-onboard/SKILL.md"
+grep -q 'DEVICE-ONBOARD:devicea' "$SKF" || { printf '两台设备没都登记进档案\n' >&2; exit 1; }
+grep -q 'DEVICE-ONBOARD:deviceb' "$SKF" || { printf '两台设备没都登记进档案\n' >&2; exit 1; }
+[ -f "$TS/.codex/AGENTS.md" ] || { printf '安装没写记忆文件\n' >&2; exit 1; }
+
+uninstall_from "$T1" "$TS" || { printf '两台设备用例：卸载第一台失败：\n' >&2; sed 's/^/  /' "$T1/un.out" >&2; exit 1; }
+if grep -q 'DEVICE-ONBOARD:devicea' "$SKF"; then
+    printf '卸载没去掉本设备的档案块\n' >&2
+    exit 1
+fi
+grep -q 'DEVICE-ONBOARD:deviceb' "$SKF" || { printf '卸载把另一台设备的档案块也删了：\n' >&2; sed 's/^/  /' "$SKF" >&2; exit 1; }
+grep -q 'DEVICE-ONBOARD-AGENTS BEGIN' "$TS/.codex/AGENTS.md" || {
+    printf '卸载带走了两边共用的记忆文件提示块（另一台设备的会话就没了这条提示）\n' >&2
+    exit 1
+}
+grep -q '记忆文件的提示块留着' "$T1/un.out" || { printf '没说明提示块为什么留着：\n' >&2; sed 's/^/  /' "$T1/un.out" >&2; exit 1; }
+
+# 最后一台也卸掉 → 档案目录与记忆文件都该消失（都是本工具的产物）
+uninstall_from "$T2" "$TS" || { printf '两台设备用例：卸载第二台失败：\n' >&2; sed 's/^/  /' "$T2/un.out" >&2; exit 1; }
+assert_gone "$SKF" '设备档案（最后一台卸掉后）'
+assert_gone "$TS/.codex/AGENTS.md" '记忆文件（最后一台卸掉后）'
 
 # 未知参数要明确拒绝，别默默当普通安装跑
 

@@ -123,6 +123,8 @@ if [ -f "$ak" ] && grep -qF "device-onboard:$id" "$ak" 2>/dev/null; then
     fi
 fi
 # ③ 设备档案：去本设备块；不再有别的设备登记时，整份档案都是本工具的产物 → 连目录一起删
+# others=1 表示这台服务器上还登记着别的设备（档案是共用的，块按设备分）。
+others=0
 for f in "$HOME/.codex/skills/device-onboard/SKILL.md" "$HOME/.claude/skills/device-onboard/SKILL.md"; do
     [ -f "$f" ] || continue
     t=$(mktemp)
@@ -133,12 +135,18 @@ for f in "$HOME/.codex/skills/device-onboard/SKILL.md" "$HOME/.claude/skills/dev
     ' "$f" > "$t" && mv "$t" "$f"
     rm -f "$f.device-onboard.bak"
     if grep -q '^<!-- DEVICE-ONBOARD:' "$f" 2>/dev/null; then
+        others=1
         echo KEPT_SKILL
     else
         rm -f "$f" && rmdir "$(dirname "$f")" 2>/dev/null && echo REMOVED_SKILL_DIR || echo REMOVED_SKILL
     fi
 done
-# ④ 记忆文件里的「设备会话」块；去掉后只剩空白的，整个文件也是我们建的 → 删掉
+# ④ 记忆文件里的「设备会话」块。**这些块不分设备**（内容只是「有 DEVICE_ONBOARD_ID 就是
+# 设备会话」这句通用说明），所以撤掉一台设备时如果服务器上还有别的设备在用它，就得留着 ——
+# 否则另一台的会话会突然失去这条提示。
+if [ "$others" = 1 ]; then
+    echo KEPT_MEMORY_BLOCK
+else
 for spec in \
     "$HOME/.codex/AGENTS.md|<!-- DEVICE-ONBOARD-AGENTS BEGIN -->|<!-- DEVICE-ONBOARD-AGENTS END -->" \
     "$HOME/.claude/CLAUDE.md|<!-- DEVICE-ONBOARD-CLAUDE BEGIN -->|<!-- DEVICE-ONBOARD-CLAUDE END -->"
@@ -153,6 +161,7 @@ do
         echo STRIPPED_MEMORY_BLOCK
     fi
 done
+fi
 # ⑤ 服务器侧回连密钥
 if [ "$keep" = 1 ]; then
     echo KEPT_SERVER_KEY
@@ -183,6 +192,7 @@ else
             REMOVED_SKILL)             printf '   已删除设备档案\n' ;;
             REMOVED_MEMORY_FILE)       printf '   已删除记忆文件里的空壳（原来只有这个块）\n' ;;
             STRIPPED_MEMORY_BLOCK)     printf '   已去掉记忆文件里的设备会话块\n' ;;
+            KEPT_MEMORY_BLOCK)         printf '   记忆文件的提示块留着 —— 这台服务器上还有别的设备在用它\n' ;;
             KEPT_SERVER_KEY)           printf '   留着服务器侧回连密钥（--keep-keys）\n' ;;
             REMOVED_SERVER_KEY)        printf '   已删除服务器侧回连密钥\n' ;;
             *)                         printf '   %s\n' "$_line" ;;
