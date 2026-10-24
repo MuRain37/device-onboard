@@ -96,6 +96,30 @@ device-tunnel                       # 只起反向隧道，前台保持，Ctrl-C
 ssh server                          # 进服务器普通 shell
 ```
 
+### 更新工具
+
+```sh
+git pull && sh install.sh
+```
+
+每次运行 `install.sh` 都是**先拆后装**：把上一次的接入拆掉，再重新接一遍。所以没有「增量修补」那条需要单独维护的路 —— 拆除只要完整，装出来的就一定是当前版本。
+
+两点是刻意保留的：
+
+- **密钥与双方的授权行不拆**，所以更新不用重新过一次密码；
+- **反向端口沿用上一次的**，因为端口就是服务器上那台 ssh 主机的身份（`known_hosts` 的键里带端口），换了号等于换了主机。
+
+更新中途失败的话，密钥还在、授权行还在 —— 修好原因重跑同一条命令就能接回来。
+
+### 卸载
+
+```sh
+device-uninstall               # 全拆：命令、双方的 config 区块、双方的授权行、密钥、状态文件
+device-uninstall --keep-keys   # 只拆派生产物，留密钥与授权行（install.sh 更新时用的就是它）
+```
+
+拆完等于「这台设备从没接过」。服务器那一半需要能连上服务器才拆得掉；连不上会明确告诉你「服务器侧没拆干净」，本地照拆。
+
 ### 用 dsh（DeepSeek Harness）：在设备浏览器里打开服务器的 Web GUI
 
 ```sh
@@ -119,8 +143,9 @@ device-harness dsh
 | 想做什么 | 在哪跑 | 命令 |
 |---|---|---|
 | 首次接入 | 设备 | `sh install.sh` |
-| 重新安装本地命令 | 设备 | `sh install.sh`（检测到已有配置就跳过接入） |
-| 重写配置块（不重新接入） | 设备 | `sh install.sh --repair` |
+| 更新工具 | 设备 | `git pull && sh install.sh`（先拆后装） |
+| 彻底卸载 | 设备 | `device-uninstall` |
+| 只拆不装 | 设备 | `device-uninstall --keep-keys` |
 | 一键干活 | 设备 | `device-harness [-C <服务器目录>] [harness] [参数…]` |
 | 在设备浏览器里用 dsh | 设备 | `device-harness dsh`（自动转发 dsh web 的端口） |
 | 只开反向隧道 | 设备 | `device-tunnel` |
@@ -153,6 +178,9 @@ device-harness dsh
 **⑦ dsh 是网页，不是终端 —— 走本地转发，且就绪信号仍然是「服务器说的」。**
 `dsh web` 只绑 loopback（连 `--host 0.0.0.0` 都不支持），所以「在设备上打开」天然就是 `ssh -L` 的活：两边用同一个端口号，它打印的那条 URL 才能在设备上原样点开（它还会校验 Host 必须是 loopback —— 转发之后仍是 `127.0.0.1`，正好满足）。就绪判据也没换样：等 `dsh web` 自己那行 `dsh web: <URL>`，不等端口；没打出这行就是没起来，把它的输出摊给你看。
 
+**⑧ 更新只有一条路：先拆后装。**
+`install.sh` 不维护「已有配置 → 增量改哪些文件」那套逻辑，而是每次先调 `device-uninstall --keep-keys` 把上一次的东西拆干净，再从头接一遍。代价是更新等于重跑一次接入（向导里一路回车），换来的是「拆除是完整的」这一条可验证的性质 —— 而不是每次加新功能都要在旧现场上打补丁、还得猜上一版留下了什么。
+
 ## 装了 / 写了哪些东西
 
 **设备侧**
@@ -162,7 +190,7 @@ device-harness dsh
 | `~/.config/device-onboard/config` | 本机接入配置（别名、端口、设备 ID） |
 | `~/.ssh/device-onboard/` | 设备私钥（**私钥永不出设备**） |
 | `~/.ssh/config` | 新增 `Host server` 标记块（进服务器的入口） |
-| `$DEVICE_ONBOARD_BIN_DIR` | 安装的 `device-tunnel` / `device-harness` |
+| `$DEVICE_ONBOARD_BIN_DIR` | 安装的 `device-tunnel` / `device-harness` / `device-uninstall` |
 
 **服务器侧**
 

@@ -186,46 +186,6 @@ if [ ! -x "$TMP_HOME/prefix/bin/device-tunnel" ]; then
     exit 1
 fi
 
-# --- 「已有配置」这条路径绝不能动 ~/.ssh/config ---
-
-mkdir -p "$TMP_HOME/p8" "$TMP_HOME/.ssh"
-cat > "$TMP_HOME/p8/config" <<'EOF'
-DEVICE_ID=xiaomi
-DEVICE_KEY=/nonexistent
-EOF
-cat > "$TMP_HOME/.ssh/config" <<'EOF'
-Host server
-    HostName example.com
-
-# >>> device-onboard:xiaomi BEGIN
-Host onboard-tunnel-xiaomi
-    RemoteForward 2230 localhost:8022
-# <<< device-onboard:xiaomi END
-EOF
-cp "$TMP_HOME/.ssh/config" "$TMP_HOME/.ssh/config.before"
-printf '0\n' | TERMUX_VERSION=0.118 PATH="$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
-    DEVICE_ONBOARD_CONFIG_DIR="$TMP_HOME/p8" DEVICE_ONBOARD_KEY_DIR="$TMP_HOME/k8" DEVICE_ONBOARD_BIN_DIR="$TMP_HOME/b8" \
-    sh "$ROOT/install.sh" >/tmp/device-onboard-smoke.out 2>&1 || true
-if ! diff -q "$TMP_HOME/.ssh/config.before" "$TMP_HOME/.ssh/config" >/dev/null; then
-    printf '「已有配置」这条路径不该改动 ~/.ssh/config\n' >&2
-    exit 1
-fi
-if grep -q '已清理' /tmp/device-onboard-smoke.out; then
-    printf '「已有配置」这条路径不该执行清理\n' >&2
-    exit 1
-fi
-
-# 配置块真的丢了，要明确提示而不是装没看见
-cat > "$TMP_HOME/.ssh/config" <<'EOF'
-Host server
-    HostName example.com
-EOF
-printf '0\n' | TERMUX_VERSION=0.118 PATH="$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
-    DEVICE_ONBOARD_CONFIG_DIR="$TMP_HOME/p8" DEVICE_ONBOARD_KEY_DIR="$TMP_HOME/k8" DEVICE_ONBOARD_BIN_DIR="$TMP_HOME/b8" \
-    sh "$ROOT/install.sh" >/tmp/device-onboard-smoke.out 2>&1 || true
-grep -q '找不到本设备' /tmp/device-onboard-smoke.out
-rm -f "$TMP_HOME/.ssh/config" "$TMP_HOME/.ssh/config.before"
-
 # --- 完整跑一遍接入（假 ssh），并验证生成的配置真能被 ssh 解析 ---
 # 这组是昨晚那串坑的回归防线：配置块写法、PATH、e2e 握手、状态文件。
 
@@ -1010,130 +970,203 @@ FAKE_CONFIG_PORTS='mac 2230' run_install_port_case "$TMP_HOME/p32"
 grep -q '^REVERSE_PORT=2231$' "$TMP_HOME/p32/cfg/config" || { printf '③ 应跳过 config 里登记给 mac 的 2230，实际: %s\n' "$(grep '^REVERSE_PORT=' "$TMP_HOME/p32/cfg/config")" >&2; exit 1; }
 grep -q '跳过端口 2230：已登记给其它设备' "$TMP_HOME/p32/out" || { printf '③ 没有用 config 台账保护别设备的端口\n' >&2; sed 's/^/  /' "$TMP_HOME/p32/out" >&2; exit 1; }
 
-# --- --repair：别名规则变了，把已经接好的设备迁移过来 ---
-# 背景：「已有配置」那条路径刻意不碰 ~/.ssh/config（怕清掉重建不出来），
-# 于是老设备上的旧块会一直留着。改名、去掉隧道 Host 之后，必须有个「不重新接入
-# 也能重写标记块」的口子，否则老设备的配置永远停在旧规则上。
-REPAIR_HOME="$TMP_HOME/r1"
-mkdir -p "$REPAIR_HOME/.ssh" "$REPAIR_HOME/cfg" "$REPAIR_HOME/keys"
-# 上一版规则的现场：服务器 Host 带设备名后缀、反向隧道单占一个 Host、
-# 块外还有用户手写的 Host keepme（必须原样保留）。
-cat > "$REPAIR_HOME/.ssh/config" <<'EOF'
-Host keepme
-    HostName example.com
-
-# >>> device-onboard:xiaomitest BEGIN
-Host onboard-server-xiaomitest
-    HostName 134.175.91.169
-    User ubuntu
-    Port 22
-    IdentityFile /old/path/xiaomitest-device
-
-Host onboard-tunnel-xiaomitest
-    HostName 134.175.91.169
-    User ubuntu
-    Port 22
-    RemoteForward 2230 localhost:8022
-    ExitOnForwardFailure yes
-# <<< device-onboard:xiaomitest END
-EOF
-: > "$REPAIR_HOME/keys/xiaomitest-device"
-cat > "$REPAIR_HOME/cfg/config" <<EOF
-DEVICE_ID=xiaomitest
-DEVICE_NAME=xiaomitest
-DEVICE_USER=mac
-SERVER_HOST=134.175.91.169
-SERVER_USER=ubuntu
-SERVER_PORT=22
-DEVICE_PORT=8022
-REVERSE_PORT=2230
-SERVER_HOST_ALIAS=onboard-server-xiaomitest
-TUNNEL_HOST_ALIAS=onboard-tunnel-xiaomitest
-DEVICE_HOST_ALIAS=onboard-device-xiaomitest
-DEVICE_KEY=$REPAIR_HOME/keys/xiaomitest-device
-EOF
-
-# 假 ssh：远端要写的 stdin 落到文件里，就能断言服务器侧写了什么
-cat > "$FAKE_BIN/ssh" <<'EOF'
+# --- device-uninstall：把 install.sh 留下的东西拆干净 ---
+# 卸载之所以算「产品功能」而不只是运维动作：install.sh 每次运行都是先拆后装，
+# 拆除漏了半件东西，更新就会把垃圾一层层堆起来。
+#
+# 桩件把「设备」和「服务器」分到两个 HOME（$h 与 $h-server）：
+# 真机上它们是两台机器，共用一个 HOME 会把两边的断言搅在一起。
+UBIN="$TMP_HOME/ubin"
+mkdir -p "$UBIN"
+cat > "$UBIN/ssh" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >> "$FAKE_SSH_LOG"
-case "$*" in *'.ssh/config'*) cat > "$FAKE_SSH_CAPTURE" ;; esac
+for _last; do :; done
+# 'sh -s' 的远端脚本在「服务器 HOME」下真的执行：档案、提示块、密钥都会落盘
+case "$_last" in
+    'sh -s -- '*)
+        # 真 ssh 会把 `sh -s -- a b` 的参数送进远端脚本的 $1/$2；桩件也得照做，
+        # 否则脚本拿到的 $1 是空的 —— 它会「什么都没删却报完成」。
+        # 别用 ${*#...}：bash 对 ${*#pat} 是按位置参数逐个处理的，不是整串前缀。
+        _rest=$(printf '%s' "$_last" | sed 's/^sh -s -- //' | tr -d "'")
+        exec env HOME="$FAKE_SERVER_HOME" sh -s -- $_rest ;;
+    *'sh -s'*) exec env HOME="$FAKE_SERVER_HOME" sh ;;
+esac
+case "$*" in *DEVICE-ONBOARD-E2E-OK*) printf 'DEVICE-ONBOARD-E2E-OK'; exit 0 ;; esac
+case "$*" in *反向隧道已建立*) printf '✅ 反向隧道已建立\n'; exec sleep 30 ;; esac
+case "$*" in *-R*localhost*) exec sleep 30 ;; esac
+case "$*" in *'for c in codex claude'*) printf 'codex claude'; exit 0 ;; esac
+# 其余「落到服务器上」的命令（生成回连密钥、写 authorized_keys、写 ssh config）：
+# 远端要跑的那一串就是最后一个参数 —— 在服务器 HOME 下跑一遍，断言才有真文件可查。
+case "$_last" in
+    *ssh-keygen*|*authorized_keys*|*key.pub*|*'.ssh/config'*|*SKILL.md*|*AGENTS.md*|*CLAUDE.md*)
+        exec env HOME="$FAKE_SERVER_HOME" sh -c "$_last" ;;
+esac
 exit 0
 EOF
-chmod 755 "$FAKE_BIN/ssh"
+chmod 755 "$UBIN/ssh"
 
-run_repair() {
-    : > "$REPAIR_HOME/remote.cfg"
-    : > "$REPAIR_HOME/ssh.log"
-    FAKE_SSH_LOG="$REPAIR_HOME/ssh.log" FAKE_SSH_CAPTURE="$REPAIR_HOME/remote.cfg" \
-        PATH="$FAKE_BIN:$PATH" HOME="$REPAIR_HOME" DEVICE_ONBOARD_CONFIG_DIR="$REPAIR_HOME/cfg" \
-        sh "$ROOT/install.sh" --repair
+# 装一遍：$1 = 设备 HOME；服务器 HOME 固定为 <设备 HOME>-server
+install_into() {
+    _h=$1
+    _s="$_h-server"
+    mkdir -p "$_h/.ssh" "$_s/.ssh"
+    # 块外预置一条用户手写的 Host keepme：卸载不该碰它
+    printf 'Host keepme\n    HostName example.com\n' > "$_h/.ssh/config"
+    printf '1\nxiaomitest\n134.175.91.169\nubuntu\n22\n' | \
+        env FAKE_SSH_LOG="$_h/ssh.log" FAKE_SERVER_HOME="$_s" TERMUX_VERSION=0.118 PATH="$UBIN:$PATH" HOME="$_h" \
+        DEVICE_ONBOARD_REVERSE_PORT_START=2230 DEVICE_ONBOARD_REVERSE_PORT_END=2230 \
+        DEVICE_ONBOARD_CONFIG_DIR="$_h/cfg" DEVICE_ONBOARD_KEY_DIR="$_h/keys" DEVICE_ONBOARD_BIN_DIR="$_h/bin" \
+        sh "$ROOT/install.sh" > "$_h/out" 2>&1
 }
 
-run_repair > "$REPAIR_HOME/out" 2>&1 || {
-    printf '--repair 失败了：\n' >&2
-    sed 's/^/  /' "$REPAIR_HOME/out" >&2
+# 卸载：$1 = 设备 HOME，其余参数原样传给 device-uninstall
+uninstall_from() {
+    _h=$1
+    shift
+    env FAKE_SSH_LOG="$_h/ssh.log" FAKE_SERVER_HOME="$_h-server" PATH="$UBIN:$PATH" HOME="$_h" \
+        DEVICE_ONBOARD_CONFIG_DIR="$_h/cfg" DEVICE_ONBOARD_KEY_DIR="$_h/keys" \
+        sh "$ROOT/bin/device-uninstall" "$@" > "$_h/un.out" 2>&1
+}
+
+assert_gone() {
+    if [ -e "$1" ]; then printf '卸载后还在：%s（%s）\n' "$1" "$2" >&2; exit 1; fi
+}
+
+# ① 全拆：两边都不该留东西，用户手写的 Host keepme 必须还在
+U1="$TMP_HOME/u1"
+install_into "$U1" || { printf '卸载用例的前置安装失败：\n' >&2; sed 's/^/  /' "$U1/out" >&2; exit 1; }
+[ -f "$U1/cfg/config" ] && [ -f "$U1/keys/xiaomitest-device" ] && [ -x "$U1/bin/device-uninstall" ] || {
+    printf '安装没有产出预期的文件，卸载用例不成立\n' >&2
     exit 1
 }
+grep -q 'device-onboard:xiaomitest' "$U1/.ssh/authorized_keys" || { printf '前置安装没写本地 authorized_keys\n' >&2; exit 1; }
+[ -f "$U1-server/.codex/skills/device-onboard/SKILL.md" ] || { printf '前置安装没在服务器侧写设备档案\n' >&2; exit 1; }
+grep -q 'Host onboard-device-xiaomitest' "$U1-server/.ssh/config" || { printf '前置安装没在服务器侧写回连 Host\n' >&2; exit 1; }
 
-grep -qx 'Host server' "$REPAIR_HOME/.ssh/config" || {
-    printf -- '--repair 没把服务器别名换成 server：\n' >&2
-    sed 's/^/  /' "$REPAIR_HOME/.ssh/config" >&2
+uninstall_from "$U1" || {
+    printf 'device-uninstall 失败：\n' >&2
+    sed 's/^/  /' "$U1/un.out" >&2
     exit 1
 }
-if grep -q 'onboard-tunnel\|onboard-server-xiaomitest\|RemoteForward' "$REPAIR_HOME/.ssh/config"; then
-    printf -- '--repair 没清掉上一版的别名：\n' >&2
-    sed 's/^/  /' "$REPAIR_HOME/.ssh/config" >&2
+grep -q '拆除完成' "$U1/un.out" || { printf '卸载没有完成提示：\n' >&2; sed 's/^/  /' "$U1/un.out" >&2; exit 1; }
+
+# 设备侧
+assert_gone "$U1/cfg/config" '状态文件'
+assert_gone "$U1/keys/xiaomitest-device" '设备密钥'
+assert_gone "$U1/bin/device-tunnel" '本地命令'
+assert_gone "$U1/bin/device-harness" '本地命令'
+assert_gone "$U1/bin/device-uninstall" '本地命令（它自己）'
+assert_gone "$U1/.ssh/config.device-onboard.bak" '我们留的配置备份'
+if grep -q 'device-onboard' "$U1/.ssh/config"; then
+    printf '卸载后设备侧 ~/.ssh/config 里还有本工具的区块：\n' >&2
+    sed 's/^/  /' "$U1/.ssh/config" >&2
     exit 1
 fi
-grep -qx 'Host keepme' "$REPAIR_HOME/.ssh/config" || { printf -- '--repair 动了块外的手写内容\n' >&2; exit 1; }
-
-# 重写而不是追加：标记块还得只有一个
-begin_count=$(grep -c '^# >>> device-onboard:xiaomitest BEGIN$' "$REPAIR_HOME/.ssh/config" || true)
-[ "$begin_count" = 1 ] || { printf -- '--repair 后标记块有 %s 个（应该是 1 个）\n' "$begin_count" >&2; exit 1; }
-
-grep -qx 'Host onboard-device-xiaomitest' "$REPAIR_HOME/remote.cfg" || {
-    printf -- '--repair 没重写服务器侧的回连 Host：\n' >&2
-    sed 's/^/  /' "$REPAIR_HOME/remote.cfg" >&2
-    exit 1
-}
-grep -qx 'SERVER_HOST_ALIAS=server' "$REPAIR_HOME/cfg/config" || { printf -- '--repair 没同步状态文件里的别名\n' >&2; exit 1; }
-if grep -q 'TUNNEL_HOST_ALIAS' "$REPAIR_HOME/cfg/config"; then
-    printf -- '--repair 没清掉状态文件里的 TUNNEL_HOST_ALIAS\n' >&2
+grep -qx 'Host keepme' "$U1/.ssh/config" || { printf '卸载动了用户手写的 Host keepme\n' >&2; exit 1; }
+if grep -q 'device-onboard:xiaomitest' "$U1/.ssh/authorized_keys" 2>/dev/null; then
+    printf '卸载后设备侧 authorized_keys 还有回连公钥的行\n' >&2
     exit 1
 fi
 
-# 幂等：再跑一次，内容一个字节都不该变
-cp "$REPAIR_HOME/.ssh/config" "$REPAIR_HOME/config.once"
-run_repair > /dev/null 2>&1 || true
-diff -q "$REPAIR_HOME/config.once" "$REPAIR_HOME/.ssh/config" >/dev/null || {
-    printf -- '--repair 不幂等：第二次跑改动了配置\n' >&2
-    exit 1
-}
-
-# 没有状态文件时必须明确报错，而不是当普通安装跑进向导
-if PATH="$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
-        DEVICE_ONBOARD_CONFIG_DIR="$TMP_HOME/nostate" DEVICE_ONBOARD_KEY_DIR="$TMP_HOME/nokeys" \
-        DEVICE_ONBOARD_BIN_DIR="$TMP_HOME/nobin" \
-        sh "$ROOT/install.sh" --repair </dev/null >/tmp/device-onboard-smoke.out 2>&1; then
-    printf '没有接入配置时 --repair 竟然成功了\n' >&2
+# 服务器侧
+assert_gone "$U1-server/.codex/skills/device-onboard/SKILL.md" '设备档案'
+assert_gone "$U1-server/.claude/skills/device-onboard/SKILL.md" '设备档案（claude 那份）'
+assert_gone "$U1-server/.codex/AGENTS.md" '记忆文件（原来只有本工具的块）'
+assert_gone "$U1-server/.claude/CLAUDE.md" '记忆文件（原来只有本工具的块）'
+assert_gone "$U1-server/.ssh/device-onboard/xiaomitest-server" '服务器侧回连密钥'
+if grep -q 'device-onboard' "$U1-server/.ssh/config" 2>/dev/null; then
+    printf '卸载后服务器侧 ~/.ssh/config 里还有回连区块：\n' >&2
+    sed 's/^/  /' "$U1-server/.ssh/config" >&2
     exit 1
 fi
-grep -q -- '--repair 需要已有接入配置' /tmp/device-onboard-smoke.out
+if grep -q 'device-onboard:xiaomitest' "$U1-server/.ssh/authorized_keys" 2>/dev/null; then
+    printf '卸载后服务器侧 authorized_keys 还有本设备的公钥\n' >&2
+    exit 1
+fi
+
+# ② --keep-keys：密钥与双方的授权行留着（否则每次更新都要重新过一次密码）
+U2="$TMP_HOME/u2"
+install_into "$U2" || { printf '--keep-keys 用例的前置安装失败：\n' >&2; sed 's/^/  /' "$U2/out" >&2; exit 1; }
+key_before=$(cksum "$U2/keys/xiaomitest-device" | awk '{print $1}')
+uninstall_from "$U2" --keep-keys || {
+    printf 'device-uninstall --keep-keys 失败：\n' >&2
+    sed 's/^/  /' "$U2/un.out" >&2
+    exit 1
+}
+[ -f "$U2/keys/xiaomitest-device" ] || { printf -- '--keep-keys 却把设备密钥删了\n' >&2; exit 1; }
+[ "$(cksum "$U2/keys/xiaomitest-device" | awk '{print $1}')" = "$key_before" ] || {
+    printf -- '--keep-keys 改动了设备密钥（下次更新就要重新过密码）\n' >&2
+    exit 1
+}
+grep -q 'device-onboard:xiaomitest' "$U2/.ssh/authorized_keys" || { printf -- '--keep-keys 却删了设备侧授权行\n' >&2; exit 1; }
+[ -f "$U2-server/.ssh/device-onboard/xiaomitest-server" ] || { printf -- '--keep-keys 却删了服务器侧回连密钥\n' >&2; exit 1; }
+grep -q 'device-onboard:xiaomitest' "$U2-server/.ssh/authorized_keys" || { printf -- '--keep-keys 却删了服务器侧授权行\n' >&2; exit 1; }
+# 派生产物照样得拆掉
+assert_gone "$U2/cfg/config" '状态文件'
+assert_gone "$U2/bin/device-harness" '本地命令'
+if grep -q 'device-onboard' "$U2/.ssh/config"; then
+    printf -- '--keep-keys 也没有清掉设备侧 config 里的区块\n' >&2
+    exit 1
+fi
+
+# ③ 重跑 install.sh = 先拆后装：一路回车就能更新，端口与密钥沿用上一次
+U3="$TMP_HOME/u3"
+install_into "$U3" || { printf '更新用例的前置安装失败：\n' >&2; sed 's/^/  /' "$U3/out" >&2; exit 1; }
+key_before=$(cksum "$U3/keys/xiaomitest-device" | awk '{print $1}')
+port_before=$(sed -n 's/^REVERSE_PORT=//p' "$U3/cfg/config")
+printf '1\n\n\n\n\n' | \
+    env FAKE_SSH_LOG="$U3/ssh.log" FAKE_SERVER_HOME="$U3-server" TERMUX_VERSION=0.118 PATH="$UBIN:$PATH" HOME="$U3" \
+    DEVICE_ONBOARD_REVERSE_PORT_START=2230 DEVICE_ONBOARD_REVERSE_PORT_END=2230 \
+    DEVICE_ONBOARD_CONFIG_DIR="$U3/cfg" DEVICE_ONBOARD_KEY_DIR="$U3/keys" DEVICE_ONBOARD_BIN_DIR="$U3/bin" \
+    sh "$ROOT/install.sh" > "$U3/out2" 2>&1 || {
+    printf '重跑 install.sh（更新）失败：\n' >&2
+    sed 's/^/  /' "$U3/out2" >&2
+    exit 1
+}
+grep -q '先拆掉再重装' "$U3/out2" || { printf '更新没有走「先拆后装」：\n' >&2; sed 's/^/  /' "$U3/out2" >&2; exit 1; }
+grep -q '拆除完成' "$U3/out2" || { printf '更新时没有真的拆：\n' >&2; sed 's/^/  /' "$U3/out2" >&2; exit 1; }
+[ "$(cksum "$U3/keys/xiaomitest-device" | awk '{print $1}')" = "$key_before" ] || {
+    printf '更新把设备密钥重造了（等于重新接了一台设备）\n' >&2
+    exit 1
+}
+[ "$(sed -n 's/^REVERSE_PORT=//p' "$U3/cfg/config")" = "$port_before" ] || {
+    printf '更新换了反向端口（known_hosts 里那台主机的身份就变了）\n' >&2
+    exit 1
+}
+begin_count=$(grep -c '^# >>> device-onboard:xiaomitest BEGIN$' "$U3/.ssh/config" || true)
+[ "$begin_count" = 1 ] || { printf '更新后设备侧标记块有 %s 个（应该是 1 个）\n' "$begin_count" >&2; exit 1; }
+grep -qx 'Host server' "$U3/.ssh/config" || { printf '更新后设备侧没写出 Host server：\n' >&2; sed 's/^/  /' "$U3/.ssh/config" >&2; exit 1; }
+srv_count=$(grep -c '^# >>> device-onboard:xiaomitest BEGIN$' "$U3-server/.ssh/config" || true)
+[ "$srv_count" = 1 ] || { printf '更新后服务器侧回连块有 %s 个（应该是 1 个）\n' "$srv_count" >&2; exit 1; }
+grep -q '^BIN_DIR=' "$U3/cfg/config" || { printf '状态文件没记 BIN_DIR（卸载就找不到装在哪了）\n' >&2; exit 1; }
+
+# ④ 状态文件没了也要能把本地残留清掉，并明说服务器侧得人工收拾
+U4="$TMP_HOME/u4"
+install_into "$U4" || { printf '缺状态文件用例的前置安装失败：\n' >&2; sed 's/^/  /' "$U4/out" >&2; exit 1; }
+rm -f "$U4/cfg/config"
+uninstall_from "$U4" || {
+    printf '没有状态文件时卸载失败了：\n' >&2
+    sed 's/^/  /' "$U4/un.out" >&2
+    exit 1
+}
+grep -q '状态文件不在了' "$U4/un.out" || { printf '没说明状态文件不在：\n' >&2; sed 's/^/  /' "$U4/un.out" >&2; exit 1; }
+grep -q '服务器侧没有凭据信息' "$U4/un.out" || { printf '没提醒服务器侧要人工收拾\n' >&2; exit 1; }
+if grep -q 'device-onboard' "$U4/.ssh/config"; then
+    printf '状态文件缺失时没能清掉设备侧区块：\n' >&2
+    sed 's/^/  /' "$U4/.ssh/config" >&2
+    exit 1
+fi
+grep -qx 'Host keepme' "$U4/.ssh/config" || { printf '兜底清理顺手删了用户的 Host keepme\n' >&2; exit 1; }
 
 # 未知参数要明确拒绝，别默默当普通安装跑
-if sh "$ROOT/install.sh" --wat </dev/null >/tmp/device-onboard-smoke.out 2>&1; then
-    printf '未知参数没有被拒绝\n' >&2
-    exit 1
-fi
-grep -q '未知参数' /tmp/device-onboard-smoke.out
 
 # --- 变量引用与多字节字符的边界 ---
 # macOS 的 /bin/sh 是 bash 3.2：具名变量引用后面紧跟一个汉字时，它会把那个多字节
 # 字符的前几字节吃进变量名 —— set -u 下报 unbound variable（真机踩过：install.sh
 # 的回滚路径整段中断、只回滚了一半），不报时静默输出乱码。位置参数（$1）与特殊
 # 参数（$?）不受影响，但具名变量一律写成 ${name}。
-for _f in "$ROOT/install.sh" "$ROOT/bin/device-harness" "$ROOT/bin/device-tunnel" "$ROOT/tests/smoke.sh"; do
+for _f in "$ROOT/install.sh" "$ROOT/bin/device-harness" "$ROOT/bin/device-tunnel" "$ROOT/bin/device-uninstall" "$ROOT/tests/smoke.sh"; do
     if LC_ALL=C grep -q '\$[A-Za-z_][A-Za-z0-9_]*[^ -~]' "$_f" 2>/dev/null; then
         printf '%s 里有「变量引用紧邻非 ASCII 字符」的写法（macOS bash 3.2 会解析错）：\n' "$_f" >&2
         LC_ALL=C grep -n '\$[A-Za-z_][A-Za-z0-9_]*[^ -~]' "$_f" | sed 's/^/  /' >&2

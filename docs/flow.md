@@ -54,7 +54,12 @@ flowchart LR
 
 ---
 
-## 2. 首次接入：`install.sh`（在设备上跑）
+## 2. 接入/更新：`install.sh`（在设备上跑）
+
+**每次运行都是先拆后装**：有旧接入就先跑 `device-uninstall --keep-keys`（拆掉命令、双方的
+config 区块、档案与提示块、状态文件，**留密钥与双方的授权行**），再从头接一遍。
+更新就只是重跑这一条命令；拆除漏了东西，更新就会把垃圾一层层堆起来，所以「拆得干净」
+本身就是被测住的性质（`tests/smoke.sh` 里有一组用例专门拆它）。
 
 ```mermaid
 sequenceDiagram
@@ -63,7 +68,8 @@ sequenceDiagram
     participant S as 服务器
 
     D->>D: detect_platform()<br/>Darwin → macos；Termux → termux
-    U->>D: 输入服务器 IP / 用户名 / 端口
+    D->>D: 有旧接入？先 device-uninstall --keep-keys<br/>（拆干净，留密钥与双方授权行）
+    U->>D: 输入服务器 IP / 用户名 / 端口<br/>（默认值取自上一次的状态文件）
     D->>S: ssh 登录（密码由你手输，脚本不存密码）
     D->>D: 生成密钥对（本地）
     D->>S: 追加公钥到服务器 authorized_keys
@@ -95,27 +101,36 @@ sequenceDiagram
 - **别名只有两个**：设备侧 `server`（进服务器的入口），服务器侧 `onboard-device-<设备名>`
   （给服务器上的 agent 回连设备用）。反向隧道不单独占 Host —— 端口只在状态文件里存一份，
   `device-tunnel` 拼 `-R` 时现场取；写进 `~/.ssh/config` 就等于同一个端口存两份，日后会分叉。
-- **`sh install.sh --repair`**：因为上面那条"跳过路径不碰 ssh config"，别名规则一变，
-  老设备上的旧块就会一直留着。`--repair` 补这个口 —— 不重新接入、不动密钥，
-  只按状态文件把双方的标记块重写成当前版本的样子（顺带同步状态文件里的别名）。
+- **重跑 = 先拆后装**：向导默认值取自上一次的状态文件（一路回车即可），
+  反向端口也优先复用 —— 端口就是服务器上那台 ssh 主机的身份，换了号指纹就得重认。
+  密钥和双方的授权行留着，所以更新不用重新过一次密码。
 
 ---
 
-## 2.5 别名规则演进时怎么办：`sh install.sh --repair`
+## 2.5 卸载：`device-uninstall`
 
 ```sh
-sh install.sh --repair     # 在设备上跑，读 ~/.config/device-onboard/config
+device-uninstall               # 全拆
+device-uninstall --keep-keys   # 只拆派生产物，留密钥与双方的授权行
 ```
 
-干三件事，都不碰密钥和公钥授权：
+拆的东西分两半，**服务器那一半必须先拆** —— 拆完本地密钥就 ssh 不上去了：
 
-| 步骤 | 动作 |
+| 位置 | 拆什么 |
 |---|---|
-| ① 设备侧 | 去掉本设备的旧标记块，按当前规则重写（`Host server`），块外内容原样保留 |
-| ② 服务器侧 | 同样重写 `Host onboard-device-<设备名>`（连不上就跳过并明说） |
-| ③ 状态文件 | 纠正 `SERVER_HOST_ALIAS` / `DEVICE_HOST_ALIAS`，清掉已废弃的字段 |
+| 设备 | 已安装的 `device-tunnel` / `device-harness` / `device-uninstall`（按状态文件里的 `BIN_DIR` 删，不去 PATH 上瞎找） |
+| 设备 | `~/.ssh/config` 里本设备的标记块 + 我们留的 `.bak`；`authorized_keys` 里的回连公钥行（`--keep-keys` 时留） |
+| 设备 | 设备密钥（`--keep-keys` 时留）、状态文件与配置目录 |
+| 服务器 | `~/.ssh/config` 回连区块；`authorized_keys` 里本设备公钥；回连密钥（`--keep-keys` 时留） |
+| 服务器 | 设备档案里本设备那一块（没有别的设备了就整个档案目录删掉）；记忆文件里的设备会话块（文件因此变空就连文件删掉） |
 
-它**不**刷新服务器上的设备档案（SKILL.md）—— 那个要重新接入才会更新。
+两个坑写在这儿免得再踩：
+
+- **远端脚本用引号定界的 heredoc**（`<<'EOF'`），设备 ID 与 keep 标记从命令行以 `$1`/`$2` 传进去。
+  早先是「未引号 heredoc + 反斜杠转义」，漏一个 `$` 就在本地展开，`set -u` 下直接
+  `unbound variable` —— 远端脚本整段没跑，卸载却报了「完成」。
+- **不用 `grep -v pat file > tmp && mv tmp file` 删行**：每行都匹配时 `grep -v` 返回 1，
+  后面的 `mv` 根本不执行 —— 文件原样留着，还打印「已删除」。改用 `awk 'index($0,pat)==0'`。
 
 ---
 
@@ -279,7 +294,8 @@ flowchart TD
 | 想做什么 | 在哪跑 | 命令 |
 |---|---|---|
 | 首次接入 | 设备 | `sh install.sh` |
-| 重写配置块（不重新接入） | 设备 | `sh install.sh --repair` |
+| 更新工具（先拆后装） | 设备 | `git pull && sh install.sh` |
+| 彻底卸载 | 设备 | `device-uninstall` |
 | 只开隧道 | 设备 | `device-tunnel` |
 | 一键干活（默认服务器家目录） | 设备 | `device-harness` |
 | 一键干活（指定服务器目录） | 设备 | `device-harness -C '~/项目'` |

@@ -1,0 +1,249 @@
+#!/bin/sh
+# 拆掉 install.sh 在这台设备上做过的一切。
+#
+#   device-uninstall              全拆：本地命令、双方的 ssh config 区块、双方的授权行、
+#                                 密钥、状态文件 —— 等于「这台设备从没接过」
+#   device-uninstall --keep-keys  只拆派生产物，留密钥与双方的授权行
+#
+# 为什么要有 --keep-keys：install.sh 每次运行都是「先拆后装」，用它来实现更新。
+# 连密钥一起拆的话，每次更新都得重新过一次密码 —— 那不叫更新，叫重新接一台设备。
+set -eu
+
+usage() {
+    cat <<'EOF'
+用法：device-uninstall [--keep-keys]
+
+拆掉 install.sh 在这台设备上留下的东西：本地命令、双方 ~/.ssh/config 的标记区块、
+双方的 authorized_keys 行、设备档案与记忆文件里的区块、密钥、状态文件。
+
+  --keep-keys   留着密钥和双方的授权行（install.sh 更新时用的就是这个）
+  --help        看这段说明
+
+拆完服务器那一半需要能连上服务器；连不上会明确告诉你「服务器侧没拆干净」，本地照拆。
+EOF
+}
+
+die() { printf '错误：%s\n' "$*" >&2; exit 1; }
+
+CONFIG_DIR=${DEVICE_ONBOARD_CONFIG_DIR:-"$HOME/.config/device-onboard"}
+STATE_FILE="$CONFIG_DIR/config"
+KEY_DIR=${DEVICE_ONBOARD_KEY_DIR:-"$HOME/.ssh/device-onboard"}
+
+KEEP_KEYS=0
+for _arg in "$@"; do
+    case "$_arg" in
+        --keep-keys) KEEP_KEYS=1 ;;
+        --help|-h)   usage; exit 0 ;;
+        *)           die "未知参数：${_arg}（用法见 device-uninstall --help）" ;;
+    esac
+done
+
+# 只去掉本设备的块；返回 0 表示确实去掉了。
+strip_local_block() {
+    _cfg="$HOME/.ssh/config"
+    [ -f "$_cfg" ] || return 1
+    _id=$1
+    grep -qF "# >>> device-onboard:$_id BEGIN" "$_cfg" 2>/dev/null || return 1
+    _tmp=$(mktemp) || return 1
+    awk -v id="$_id" '
+        $0 == "# >>> device-onboard:" id " BEGIN" { skip = 1; next }
+        $0 == "# <<< device-onboard:" id " END"   { skip = 0; next }
+        !skip { print }
+    ' "$_cfg" > "$_tmp"
+    chmod 600 "$_tmp" 2>/dev/null || true
+    mv "$_tmp" "$_cfg"
+    return 0
+}
+
+# ---------- 没有状态文件时的兜底 ----------
+# 状态文件才是「源」，但它可能被人手删了。这时至少把本地 ssh config 里的区块清掉 ——
+# 否则一堆指向不存在的设备的 Host 就永远留在配置里。服务器那一半没有凭据信息，只能人工。
+if [ ! -f "$STATE_FILE" ]; then
+    _ids=$(sed -n 's/^# >>> device-onboard:\(.*\) BEGIN$/\1/p' "$HOME/.ssh/config" 2>/dev/null || true)
+    [ -n "$_ids" ] || die "这台设备上没有接入配置（$STATE_FILE 不存在），没什么可拆的。"
+    printf '状态文件不在了，只按 ~/.ssh/config 里的标记清本地残留。\n'
+    printf '服务器侧没有凭据信息，需要你登录服务器手工收拾（authorized_keys、密钥、设备档案）。\n'
+    for _id in $_ids; do
+        strip_local_block "$_id" && printf '  已去掉 ~/.ssh/config 里 %s 的区块。\n' "$_id"
+    done
+    rm -f "$HOME/.ssh/config.device-onboard.bak" 2>/dev/null || true
+    exit 0
+fi
+
+# shellcheck source=/dev/null
+. "$STATE_FILE"
+device_id=${DEVICE_ID:-}
+device_key=${DEVICE_KEY:-}
+server_host=${SERVER_HOST:-}
+server_user=${SERVER_USER:-}
+server_port=${SERVER_PORT:-}
+[ -n "$device_id" ] || die "状态文件里没有 DEVICE_ID（${STATE_FILE}），不敢乱拆。"
+
+server_ssh() {
+    ssh -i "$device_key" -o IdentitiesOnly=yes -p "$server_port" "$server_user@$server_host" "$@"
+}
+
+# ---------- 服务器侧：必须在删本地密钥之前做 ----------
+# 拆完密钥，就再也 ssh 不上去了 —— 顺序不能反。
+uninstall_server() {
+    if [ -z "$device_key" ] || [ ! -f "$device_key" ]; then
+        printf '⚠️ 本地设备密钥不在了（%s），无法连服务器拆那一半。\n' "${device_key:-未配置}"
+        return 1
+    fi
+    # 远端脚本用**引号定界的 heredoc**（一个字都不在本地展开），两个参数从命令行送进去：
+    #   $1 = 设备 ID，$2 = 是否保留密钥。
+    # 上一版是「未引号 heredoc + 反斜杠转义」，漏掉一个 $ 就在本地展开了，
+    # set -u 下直接 unbound variable —— 远端脚本整段没跑，卸载却报「完成」。
+    cat <<'SERVER_EOF' | server_ssh "sh -s -- '$device_id' '$_keep'"
+set +e
+id=$1
+keep=$2
+# ① 服务器 ~/.ssh/config 里本设备的回连 Host 区块，以及我们留的备份
+cfg="$HOME/.ssh/config"
+if [ -f "$cfg" ] && grep -qF "# >>> device-onboard:$id BEGIN" "$cfg" 2>/dev/null; then
+    t=$(mktemp)
+    awk -v id="$id" '
+        $0 == "# >>> device-onboard:" id " BEGIN" { skip = 1; next }
+        $0 == "# <<< device-onboard:" id " END"   { skip = 0; next }
+        !skip { print }
+    ' "$cfg" > "$t" && mv "$t" "$cfg" && chmod 600 "$cfg" && echo REMOVED_SERVER_SSH_CONFIG
+fi
+rm -f "$cfg.device-onboard.bak"
+# ② 设备公钥的授权行
+ak="$HOME/.ssh/authorized_keys"
+if [ -f "$ak" ] && grep -qF "device-onboard:$id" "$ak" 2>/dev/null; then
+    if [ "$keep" = 1 ]; then
+        echo KEPT_AUTHORIZED_KEY
+    else
+        # 用 awk 不用 `grep -v`：每行都匹配时 grep -v 返回 1（它没选中任何行），
+        # 于是 `grep -v ... && mv` 里的 mv 不会执行 —— 文件原样留着却报「已删除」。
+        awk -v pat="device-onboard:$id" 'index($0, pat) == 0' "$ak" > "$ak.rm" \
+            && mv "$ak.rm" "$ak" && chmod 600 "$ak" && echo REMOVED_AUTHORIZED_KEY \
+            || echo FAILED_AUTHORIZED_KEY
+    fi
+fi
+# ③ 设备档案：去本设备块；不再有别的设备登记时，整份档案都是本工具的产物 → 连目录一起删
+for f in "$HOME/.codex/skills/device-onboard/SKILL.md" "$HOME/.claude/skills/device-onboard/SKILL.md"; do
+    [ -f "$f" ] || continue
+    t=$(mktemp)
+    awk -v id="$id" '
+        $0 == "<!-- DEVICE-ONBOARD:" id " BEGIN -->" { skip = 1; next }
+        $0 == "<!-- DEVICE-ONBOARD:" id " END -->"   { skip = 0; next }
+        !skip { print }
+    ' "$f" > "$t" && mv "$t" "$f"
+    rm -f "$f.device-onboard.bak"
+    if grep -q '^<!-- DEVICE-ONBOARD:' "$f" 2>/dev/null; then
+        echo KEPT_SKILL
+    else
+        rm -f "$f" && rmdir "$(dirname "$f")" 2>/dev/null && echo REMOVED_SKILL_DIR || echo REMOVED_SKILL
+    fi
+done
+# ④ 记忆文件里的「设备会话」块；去掉后只剩空白的，整个文件也是我们建的 → 删掉
+for spec in \
+    "$HOME/.codex/AGENTS.md|<!-- DEVICE-ONBOARD-AGENTS BEGIN -->|<!-- DEVICE-ONBOARD-AGENTS END -->" \
+    "$HOME/.claude/CLAUDE.md|<!-- DEVICE-ONBOARD-CLAUDE BEGIN -->|<!-- DEVICE-ONBOARD-CLAUDE END -->"
+do
+    f=${spec%%|*}; rest=${spec#*|}; b=${rest%%|*}; e=${rest#*|}
+    [ -f "$f" ] || continue
+    t=$(mktemp)
+    awk -v b="$b" -v e="$e" '$0 == b {skip=1; next} $0 == e {skip=0; next} !skip {print}' "$f" > "$t" && mv "$t" "$f"
+    if [ -z "$(tr -d '[:space:]' < "$f")" ]; then
+        rm -f "$f" && echo REMOVED_MEMORY_FILE
+    else
+        echo STRIPPED_MEMORY_BLOCK
+    fi
+done
+# ⑤ 服务器侧回连密钥
+if [ "$keep" = 1 ]; then
+    echo KEPT_SERVER_KEY
+else
+    rm -f "$HOME/.ssh/device-onboard/$id-server" "$HOME/.ssh/device-onboard/$id-server.pub"
+    rmdir "$HOME/.ssh/device-onboard" 2>/dev/null
+    echo REMOVED_SERVER_KEY
+fi
+SERVER_EOF
+}
+_keep=0
+if [ "$KEEP_KEYS" = 1 ]; then _keep=1; fi
+
+printf '开始拆除（设备 %s）…\n\n' "$device_id"
+printf '① 服务器侧…\n'
+_server_out=$(uninstall_server 2>&1 || true)
+if [ -z "$_server_out" ]; then
+    printf '   ⚠️ 没有输出（连不上？），服务器侧可能没拆干净。\n'
+else
+    printf '%s\n' "$_server_out" | while IFS= read -r _line; do
+        case "$_line" in
+            REMOVED_SERVER_SSH_CONFIG) printf '   已去掉服务器 ~/.ssh/config 里的回连区块\n' ;;
+            REMOVED_AUTHORIZED_KEY)    printf '   已去掉服务器 authorized_keys 里的本设备公钥\n' ;;
+            FAILED_AUTHORIZED_KEY)     printf '   ⚠️ 服务器 authorized_keys 没清掉，请登录服务器手工检查\n' ;;
+            KEPT_AUTHORIZED_KEY)       printf '   留着服务器 authorized_keys 里的本设备公钥（--keep-keys）\n' ;;
+            KEPT_SKILL)                printf '   设备档案里还有别的设备，只去掉了本设备那一块\n' ;;
+            REMOVED_SKILL_DIR)         printf '   已删除设备档案（没有别的设备了，整个目录都是本工具的）\n' ;;
+            REMOVED_SKILL)             printf '   已删除设备档案\n' ;;
+            REMOVED_MEMORY_FILE)       printf '   已删除记忆文件里的空壳（原来只有这个块）\n' ;;
+            STRIPPED_MEMORY_BLOCK)     printf '   已去掉记忆文件里的设备会话块\n' ;;
+            KEPT_SERVER_KEY)           printf '   留着服务器侧回连密钥（--keep-keys）\n' ;;
+            REMOVED_SERVER_KEY)        printf '   已删除服务器侧回连密钥\n' ;;
+            *)                         printf '   %s\n' "$_line" ;;
+        esac
+    done
+fi
+
+printf '\n② 本地 ssh config…\n'
+if strip_local_block "$device_id"; then
+    printf '   已去掉 %s 的区块\n' "$device_id"
+else
+    printf '   没有找到区块（可能已经清理过）\n'
+fi
+rm -f "$HOME/.ssh/config.device-onboard.bak" 2>/dev/null || true
+
+printf '\n③ 本地授权与密钥…\n'
+if [ "$KEEP_KEYS" = 1 ]; then
+    printf '   留着设备密钥与 authorized_keys 里的回连公钥（--keep-keys）\n'
+else
+    _ak="$HOME/.ssh/authorized_keys"
+    if [ -f "$_ak" ] && grep -qF "device-onboard:$device_id" "$_ak" 2>/dev/null; then
+        if awk -v pat="device-onboard:$device_id" 'index($0, pat) == 0' "$_ak" > "$_ak.rm" \
+                && mv "$_ak.rm" "$_ak" && chmod 600 "$_ak"; then
+            printf '   已去掉本地 authorized_keys 里的回连公钥\n'
+        else
+            printf '   ⚠️ 本地 authorized_keys 没清掉，请手工检查 %s\n' "$_ak"
+        fi
+    else
+        printf '   本地 authorized_keys 里没有本设备的行\n'
+    fi
+    rm -f "$KEY_DIR/$device_id-device" "$KEY_DIR/$device_id-device.pub" 2>/dev/null || true
+    rmdir "$KEY_DIR" 2>/dev/null || true
+    printf '   已删除设备密钥\n'
+fi
+
+printf '\n④ 状态文件与本地命令…\n'
+rm -f "$STATE_FILE" "$CONFIG_DIR/server-key.pub" 2>/dev/null || true
+rmdir "$CONFIG_DIR" 2>/dev/null || true
+printf '   已删除 %s\n' "$STATE_FILE"
+
+# 命令装在哪个目录是状态文件记着的（install.sh 会写 BIN_DIR）。**不要去 PATH 上瞎找**：
+# PATH 里可能还有别人装的、或者另一份 HOME 里的同名命令，按 PATH 删会误伤。
+if [ -n "${DEVICE_ONBOARD_BIN_DIR:-}" ]; then
+    _bin_dirs="${BIN_DIR:-} ${DEVICE_ONBOARD_BIN_DIR}"
+else
+    _bin_dirs=${BIN_DIR:-}
+fi
+_seen=
+for _d in $_bin_dirs; do
+    case " $_seen " in *" $_d "*) continue ;; esac
+    _seen="$_seen $_d"
+    for _c in device-harness device-tunnel device-uninstall; do
+        if [ -f "$_d/$_c" ]; then
+            rm -f "$_d/$_c" && printf '   已删除 %s/%s\n' "$_d" "$_c"
+        fi
+    done
+done
+if [ -z "${_seen# }" ]; then
+    printf '   不知道本地命令装在哪（状态文件里没有 BIN_DIR）—— 手动删 device-tunnel / device-harness / device-uninstall 即可。\n'
+fi
+
+printf '\n✅ 拆除完成：这台设备上已经没有本工具留下的东西了。\n'
+if [ "$KEEP_KEYS" = 1 ]; then printf '   （密钥与双方的授权行按 --keep-keys 留着。）\n'; fi
+exit 0

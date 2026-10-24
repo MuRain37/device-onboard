@@ -9,11 +9,13 @@ KEY_DIR=${DEVICE_ONBOARD_KEY_DIR:-"$HOME/.ssh/device-onboard"}
 
 usage() {
     cat <<'EOF'
-用法：sh install.sh [--repair]
+用法：sh install.sh
 
-首次运行会安装本地命令并进入设备接入设置；再次运行只更新本地命令。
-  --repair   不重新接入，只按状态文件重写双方 ~/.ssh/config 的标记块
-             （别名规则改了之后，用它把已经接好的设备迁移过来）
+每次运行都是「先拆后装」：把上一次的接入拆掉（保留密钥与双方的授权行），再重新接入一遍。
+所以更新工具就只是重跑这一条命令 —— 没有「增量修补」那条需要单独维护的路。
+
+  想彻底拆干净（连密钥、双方的授权行一起）：device-uninstall
+  只想拆、不想重装：device-uninstall [--keep-keys]
 
 支持平台：macOS、Termux（Android）。
 环境变量：
@@ -29,11 +31,9 @@ EOF
 
 die() { printf '错误：%s\n' "$*" >&2; exit 1; }
 
-REPAIR=0
 case "${1:-}" in
     ''|--)     : ;;
     --help|-h) usage; exit 0 ;;
-    --repair)  REPAIR=1 ;;
     *)         die "未知参数：$1（用法见 sh install.sh --help）" ;;
 esac
 # 平台差异全部收在 detect_platform 里，主流程不区分平台。
@@ -105,6 +105,39 @@ command -v ssh >/dev/null 2>&1 || die "找不到 ssh。"
 command -v ssh-keygen >/dev/null 2>&1 || die "找不到 ssh-keygen。"
 [ -n "$DEVICE_SSH_PORT" ] || die "无法确定设备 SSH 端口。"
 
+# ---------- 更新 = 先拆后装 ----------
+# 每次运行都走同一条路：把上一次的接入拆干净，再重新接一遍。
+# 这样「更新」不需要再维护一套增量修补逻辑 —— 别名规则、写过的文件、服务器上的登记，
+# 只要拆除是完整的，重装出来的就一定是当前版本的样子。
+#
+# 拆除时留密钥与双方的授权行（device-uninstall --keep-keys）：连密钥一起拆的话，
+# 每次更新都要重新过一次密码 —— 那不叫更新，叫重新接一台设备。
+#
+# 上一次的值先捞出来：向导拿它当默认值（一路回车就完事），反向端口也要优先复用 ——
+# 端口就是服务器上那个 ssh 主机的身份（known_hosts 的键里带端口），换了号等于换了主机。
+PREV_DEVICE_NAME=
+PREV_SERVER_HOST=
+PREV_SERVER_USER=
+PREV_SERVER_PORT=
+PREV_REVERSE_PORT=
+if [ -f "$STATE_FILE" ]; then
+    # shellcheck source=/dev/null
+    . "$STATE_FILE"
+    PREV_DEVICE_NAME=${DEVICE_NAME:-}
+    PREV_SERVER_HOST=${SERVER_HOST:-}
+    PREV_SERVER_USER=${SERVER_USER:-}
+    PREV_SERVER_PORT=${SERVER_PORT:-}
+    PREV_REVERSE_PORT=${REVERSE_PORT:-}
+
+    printf '\n检测到已有接入（%s），先拆掉再重装。\n' "${DEVICE_ID:-?}"
+    # 先拆后装：中途失败也不会留下「半新半旧」的现场；密钥和授权行还在，
+    # 修好后重跑这一条命令就能接回来，不用重新过一次密码。
+    if ! sh "$PROJECT_DIR/bin/device-uninstall" --keep-keys; then
+        die "拆除没走完，已中止 —— 不在半拆的现场上继续装。修好后重跑即可。"
+    fi
+    printf '\n开始重新接入。\n'
+fi
+
 mkdir -p "$BIN_DIR" "$CONFIG_DIR" "$KEY_DIR"
 chmod 700 "$CONFIG_DIR" "$KEY_DIR"
 copy_command() {
@@ -114,6 +147,7 @@ copy_command() {
 }
 copy_command "$PROJECT_DIR/bin/device-tunnel" "$BIN_DIR/device-tunnel"
 copy_command "$PROJECT_DIR/bin/device-harness" "$BIN_DIR/device-harness"
+copy_command "$PROJECT_DIR/bin/device-uninstall" "$BIN_DIR/device-uninstall"
 
 # 装的目录若不在 PATH 里，明说怎么加 —— 别让人对着 command not found 发懵。
 case ":$PATH:" in
@@ -167,7 +201,8 @@ $_e
 EOF
 }
 
-# 到服务器的 ssh 统一走这里：首次接入时这几个变量来自向导，--repair 时来自状态文件。
+# 到服务器的 ssh 统一走这里：server_host / server_user / server_port / device_key
+# 在进入向导后设好（device-uninstall 里有它自己的一份）。
 server_ssh() {
     ssh -i "$device_key" -o IdentitiesOnly=yes -p "$server_port" "$server_user@$server_host" "$@"
 }
@@ -188,7 +223,7 @@ write_local_ssh_block() {
             /^[ \t]*[Hh]ost[ \t]/ { for (i = 2; i <= NF; i++) if ($i == a) hit = 1 }
             END { exit hit ? 0 : 1 }' "$_tmp"; then
             printf '⚠️ %s 里已经有 Host %s（在 device-onboard 区块之外）。\n' "$_cfg" "$server_alias"
-            printf '   ssh 会先用你手写的那份，本项目的连接不会生效。改掉它，或用 sh install.sh --repair 重写。\n'
+            printf '   ssh 会先用你手写的那份，本项目的连接不会生效。先改掉你那份，再重跑 sh install.sh。\n'
         fi
     fi
     local_ssh_block >> "$_tmp"
@@ -202,77 +237,6 @@ write_remote_ssh_block() {
     remote_ssh_block | server_ssh "set -eu; file=\"\$HOME/.ssh/config\"; tmp=\"\$(mktemp)\"; mkdir -p \"\$HOME/.ssh\"; if [ -f \"\$file\" ]; then awk -v begin='$_b' -v end='$_e' '\$0 == begin {skip=1; next} \$0 == end {skip=0; next} !skip {print}' \"\$file\" > \"\$tmp\"; cp \"\$file\" \"\$file.device-onboard.bak\"; else : > \"\$tmp\"; fi; cat >> \"\$tmp\"; mv \"\$tmp\" \"\$file\"; chmod 600 \"\$file\""
 }
 
-# ---------- --repair：按状态文件重写双方的标记块 ----------
-# 存在的理由：别名规则会演进（去掉 onboard-tunnel-*、把服务器入口改名 server），
-# 而「已有配置」那条路径刻意不碰 ~/.ssh/config —— 于是老设备上的旧块会一直留着。
-# --repair 补这个口：不重新接入、不动密钥、不重发公钥，只把标记块换成当前版本的样子。
-repair_ssh_blocks() {
-    device_id=${DEVICE_ID:-}
-    server_host=${SERVER_HOST:-}
-    server_user=${SERVER_USER:-}
-    server_port=${SERVER_PORT:-}
-    device_port=${DEVICE_PORT:-}
-    reverse_port=${REVERSE_PORT:-}
-    device_user=${DEVICE_USER:-}
-    device_key=${DEVICE_KEY:-}
-    server_alias=server
-    device_alias="onboard-device-$device_id"
-
-    [ -n "$device_id" ]   || die "状态文件里没有 DEVICE_ID。"
-    [ -n "$server_host" ] || die "状态文件里没有 SERVER_HOST。"
-    [ -n "$server_user" ] || die "状态文件里没有 SERVER_USER。"
-    [ -n "$server_port" ] || die "状态文件里没有 SERVER_PORT。"
-    [ -n "$device_user" ] || die "状态文件里没有 DEVICE_USER。"
-    [ -n "$device_key" ]  || die "状态文件里没有 DEVICE_KEY。"
-    [ -f "$device_key" ]  || die "设备密钥不在了：${device_key}（只有重跑接入才能重建）。"
-    # 端口要进 ssh config：非数字会让之后所有 ssh 直接罢工。
-    case "$reverse_port" in ''|*[!0-9]*) die "状态文件里的 REVERSE_PORT 不是数字：'$reverse_port'。" ;; esac
-    case "$device_port"  in ''|*[!0-9]*) die "状态文件里的 DEVICE_PORT 不是数字：'$device_port'。" ;; esac
-
-    printf '\n按状态文件重写 ssh config 标记块（设备 %s）…\n' "$device_id"
-    write_local_ssh_block
-    printf '✅ 设备侧：Host %s（进服务器）\n' "$server_alias"
-    if write_remote_ssh_block; then
-        printf '✅ 服务器侧：Host %s（服务器回连设备）\n' "$device_alias"
-    else
-        printf '⚠️ 服务器侧写入失败（连不上？），已跳过 —— 设备侧不受影响。\n' >&2
-    fi
-    printf '提示：服务器上的设备档案（SKILL.md）不在修复范围内，要刷新它请重新接入。\n'
-
-    # 状态文件里的别名是配置块的「不完整副本」，一并纠正 —— 否则下一次
-    # sh install.sh 还会照着旧别名打印用法提示，指到一个已经不存在的 Host。
-    if [ -f "$STATE_FILE" ]; then
-        _tmp_state=$(mktemp) || die "无法创建临时文件。"
-        grep -v -e '^SERVER_HOST_ALIAS=' -e '^TUNNEL_HOST_ALIAS=' -e '^DEVICE_HOST_ALIAS=' "$STATE_FILE" > "$_tmp_state" || true
-        printf 'SERVER_HOST_ALIAS=%s\nDEVICE_HOST_ALIAS=%s\n' "$server_alias" "$device_alias" >> "$_tmp_state"
-        chmod 600 "$_tmp_state"
-        mv "$_tmp_state" "$STATE_FILE"
-        printf '✅ 状态文件已同步别名：%s / %s\n' "$server_alias" "$device_alias"
-    fi
-}
-
-if [ -f "$STATE_FILE" ]; then
-    printf '本地命令已更新。已有设备配置，跳过首次接入。\n'
-    # 这条路径绝不能碰 ~/.ssh/config：配置块是「产物」，状态文件才是「源」。
-    # 清掉却重建不出来，就把已经接好的设备弄瘸了。
-    # shellcheck source=/dev/null
-    . "$STATE_FILE"
-    if [ "$REPAIR" = 1 ]; then
-        repair_ssh_blocks
-        exit 0
-    fi
-    if ! grep -qF "# >>> device-onboard:$DEVICE_ID BEGIN" "$HOME/.ssh/config" 2>/dev/null; then
-        printf '\n⚠️ %s 里找不到本设备（%s）的配置块，device-tunnel 会解析不到主机。\n' "$HOME/.ssh/config" "$DEVICE_ID"
-        printf '   修复：用 sh install.sh --repair 只重写配置块（不动密钥、不重新接入）；\n'
-        printf '         或者删掉状态文件彻底重接：rm -rf %s && sh install.sh\n' "$CONFIG_DIR"
-    fi
-    printf '日常命令：device-harness（一键：隧道 + harness）、device-tunnel；在服务器上跑命令：ssh %s <命令>\n' "$SERVER_HOST_ALIAS"
-    exit 0
-fi
-
-if [ "$REPAIR" = 1 ]; then
-    die "--repair 需要已有接入配置（$STATE_FILE 不存在）。首次接入直接跑 sh install.sh。"
-fi
 
 # ---------- 失败回滚（仅首次接入路径） ----------
 # 设计裁决：按标记撤销本次新增内容 + 用备份还原已有配置，不引入事务日志/状态机。
@@ -373,7 +337,9 @@ if [ -f "\$cfg" ] && grep -qF "# >>> device-onboard:$device_id BEGIN" "\$cfg" 2>
 fi
 ak="\$HOME/.ssh/authorized_keys"
 if [ -f "\$ak" ] && grep -qF "device-onboard:$device_id" "\$ak" 2>/dev/null; then
-    grep -vF "device-onboard:$device_id" "\$ak" > "\$ak.rollback" && mv "\$ak.rollback" "\$ak" && chmod 600 "\$ak" 2>/dev/null && echo REMOVED_AUTHORIZED_KEY
+    # 用 awk 而不是 grep -v：每行都匹配时 grep -v 返回 1，后面的 mv 就不会执行 ——
+    # 文件原样留着，回滚却报「已撤回」。（这里也不能出现反引号：未引号 heredoc）
+    awk -v pat="device-onboard:$device_id" 'index(\$0, pat) == 0' "\$ak" > "\$ak.rollback" && mv "\$ak.rollback" "\$ak" && chmod 600 "\$ak" 2>/dev/null && echo REMOVED_AUTHORIZED_KEY
 fi
 # 记忆文件（~/.codex/AGENTS.md、~/.claude/CLAUDE.md）刻意不回滚：用户裁决，
 # 提示块是「无害的说明书」，留着比半路摘掉更安全。
@@ -455,21 +421,25 @@ read -r choice
 # （否则会还原备份，把 strip 刚清掉的旧坏块又装回去）。
 [ "$choice" = "1" ] || { INSTALL_OK=1; exit 0; }
 
-default_name=$DEVICE_DEFAULT_NAME
+# 向导的默认值：更新时拿上一次的值当默认，一路回车就重装完；首次接入则退回本机信息。
+default_name=${PREV_DEVICE_NAME:-$DEVICE_DEFAULT_NAME}
 printf '设备名称 [%s]：' "$default_name"
 read -r device_name
 device_name=${device_name:-$default_name}
 [ -n "$device_name" ] || die "设备名称不能为空。"
 
-printf '服务器地址（IP 或域名）：'
+printf '服务器地址（IP 或域名）%s：' "${PREV_SERVER_HOST:+ [$PREV_SERVER_HOST]}"
 read -r server_host
+server_host=${server_host:-$PREV_SERVER_HOST}
 [ -n "$server_host" ] || die "服务器地址不能为空。"
-printf '服务器 SSH 用户名：'
+printf '服务器 SSH 用户名%s：' "${PREV_SERVER_USER:+ [$PREV_SERVER_USER]}"
 read -r server_user
+server_user=${server_user:-$PREV_SERVER_USER}
 [ -n "$server_user" ] || die "服务器用户名不能为空。"
-printf '服务器 SSH 端口 [22]：'
+default_server_port=${PREV_SERVER_PORT:-22}
+printf '服务器 SSH 端口 [%s]：' "$default_server_port"
 read -r server_port
-server_port=${server_port:-22}
+server_port=${server_port:-$default_server_port}
 case "$server_port" in *[!0-9]*|'') die "服务器端口必须是数字。";; esac
 
 device_user=$(id -un)
@@ -500,8 +470,8 @@ device_pub=$(cat "$device_key.pub")
 printf '\n首次 SSH 连接将由系统提示确认主机指纹或输入密码。\n'
 printf '%s\n' "$device_pub" | ssh -p "$server_port" "$server_target" 'set -eu; umask 077; mkdir -p "$HOME/.ssh"; touch "$HOME/.ssh/authorized_keys"; key=$(cat); grep -qxF "$key" "$HOME/.ssh/authorized_keys" 2>/dev/null || printf "%s\n" "$key" >> "$HOME/.ssh/authorized_keys"; chmod 600 "$HOME/.ssh/authorized_keys"'
 
-# server_ssh() 定义在文件开头（--repair 也要用）：这里的 server_host / server_user /
-# server_port / device_key 已经由向导设好，函数体直接取这些变量。
+# server_ssh() 定义在文件开头：这里的 server_host / server_user / server_port /
+# device_key 已经由向导设好，函数体直接取这些变量。
 
 # 服务器端回连密钥是不是本次新建的 —— 回滚时只删本次生成的东西。
 if server_ssh "test -f \"\$HOME/$server_key_relative\"" 2>/dev/null; then
@@ -541,6 +511,16 @@ own_registered_port=$(printf '%s\n' "$archive_dump" | awk -v id="$device_id" '
     $0 == "<!-- DEVICE-ONBOARD:" id " BEGIN -->" { in_own = 1; next }
     $0 == "<!-- DEVICE-ONBOARD:" id " END -->"   { in_own = 0; next }
     in_own && $1 == "reverse_port:" && $2 ~ /^[0-9]+$/ { print $2; exit }')
+
+# 更新路径：上一次用的端口优先。拆除时设备档案里那份登记也一起没了，
+# 所以这条不能靠档案，靠状态文件里捞出来的 PREV_REVERSE_PORT ——
+# 端口就是服务器上那个 ssh 主机的身份（known_hosts 的键里带端口），换了号等于换了主机。
+if [ -z "$own_registered_port" ] && [ -n "$PREV_REVERSE_PORT" ]; then
+    case "$PREV_REVERSE_PORT" in
+        ''|*[!0-9]*) : ;;                              # 不是数字就干脆不用
+        *)           own_registered_port=$PREV_REVERSE_PORT ;;
+    esac
+fi
 
 registered_ports=$(printf '%s\n' "$archive_dump" | awk -v id="$device_id" '
     /^<!-- DEVICE-ONBOARD:.* BEGIN -->$/ { cur = $2; sub(/^DEVICE-ONBOARD:/, "", cur); in_block = 1; next }
@@ -824,6 +804,7 @@ REVERSE_PORT=$reverse_port
 SERVER_HOST_ALIAS=$server_alias
 DEVICE_HOST_ALIAS=$device_alias
 DEVICE_KEY=$device_key
+BIN_DIR=$BIN_DIR
 EOF
 chmod 600 "$STATE_FILE"
 INSTALL_OK=1
@@ -834,5 +815,8 @@ printf '\n✅ 设备接入完成。\n'
 printf '普通服务器：ssh %s\n' "$server_alias"
 printf '一键（隧道 + harness）：device-harness\n'
 printf '换 harness：device-harness <命令>（默认 codex，例如 device-harness claude）\n'
+printf '网页 harness：device-harness dsh（在设备浏览器里用服务器上的 dsh web）\n'
 printf '反向隧道：device-tunnel\n'
 printf '在服务器上跑 Harness：ssh %s codex\n' "$server_alias"
+printf '更新工具：重跑 sh install.sh（先拆后装）\n'
+printf '彻底卸载：device-uninstall\n'
