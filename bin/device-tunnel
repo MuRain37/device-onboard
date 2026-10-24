@@ -6,7 +6,14 @@ if [ ! -f "$CONFIG_FILE" ]; then
     exit 1
 fi
 . "$CONFIG_FILE"
-: "${TUNNEL_HOST_ALIAS:?配置缺少 TUNNEL_HOST_ALIAS}"
+: "${SERVER_HOST_ALIAS:?配置缺少 SERVER_HOST_ALIAS}"
+: "${REVERSE_PORT:?配置缺少 REVERSE_PORT}"
+: "${DEVICE_PORT:?配置缺少 DEVICE_PORT}"
+
+# 端口要拼进 -R：非数字时 ssh 会以「Bad forwarding specification」直接罢工，
+# 这里提前挡住，至少能说清是哪个变量的错。
+case "$REVERSE_PORT" in ''|*[!0-9]*) printf '错误：配置里的 REVERSE_PORT 不是数字：%s\n' "$REVERSE_PORT" >&2; exit 1 ;; esac
+case "$DEVICE_PORT"  in ''|*[!0-9]*) printf '错误：配置里的 DEVICE_PORT 不是数字：%s\n' "$DEVICE_PORT" >&2; exit 1 ;; esac
 
 # Termux（Android）会在后台回收进程；隧道必须持有唤醒锁，否则会被系统掐断。
 if [ -n "${TERMUX_VERSION:-}" ]; then
@@ -23,10 +30,14 @@ if [ -n "${TERMUX_VERSION:-}" ]; then
 fi
 
 printf '正在建立反向 SSH 隧道；保持此窗口，按 Ctrl-C 结束。\n'
-# 不用 -N：改成让服务器端跑一个「只负责报喜、然后挂住保持连接」的命令。
-# 通道的 Host 块里有 ExitOnForwardFailure yes —— 转发真绑上了才会执行到那几行，
-# 所以这句「已建立」是服务器亲口说的，不是本地瞎报。
-exec ssh "$TUNNEL_HOST_ALIAS" "\
+# 转发参数不写进 ssh config，就在这里拼 —— 端口只有一个真相（状态文件），
+# config 里再存一份 RemoteForward 只会让两者日后分叉。
+# 不用 -N：让服务器端跑一个「只负责报喜、然后挂住保持连接」的命令。
+# -o ExitOnForwardFailure=yes —— 转发真绑上了才会执行到那几行，
+# 所以那句「已建立」是服务器亲口说的，不是本地瞎报。
+exec ssh -o ExitOnForwardFailure=yes -o ServerAliveInterval=60 -o ServerAliveCountMax=3 \
+    -R "${REVERSE_PORT}:localhost:${DEVICE_PORT}" \
+    "$SERVER_HOST_ALIAS" "\
 printf '✅ 反向隧道已建立\n'; \
 printf '   服务器 127.0.0.1:${REVERSE_PORT}  →  本机 localhost:${DEVICE_PORT}\n'; \
 printf '   断开：Ctrl-C\n'; \

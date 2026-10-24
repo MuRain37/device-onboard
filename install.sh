@@ -9,9 +9,12 @@ KEY_DIR=${DEVICE_ONBOARD_KEY_DIR:-"$HOME/.ssh/device-onboard"}
 
 usage() {
     cat <<'EOF'
-用法：sh install.sh
+用法：sh install.sh [--repair]
 
 首次运行会安装本地命令并进入设备接入设置；再次运行只更新本地命令。
+  --repair   不重新接入，只按状态文件重写双方 ~/.ssh/config 的标记块
+             （别名规则改了之后，用它把已经接好的设备迁移过来）
+
 支持平台：macOS、Termux（Android）。
 环境变量：
   DEVICE_ONBOARD_BIN_DIR            本地命令安装目录（默认 Termux: $PREFIX/bin；macOS: /usr/local/bin）
@@ -26,8 +29,13 @@ EOF
 
 die() { printf '错误：%s\n' "$*" >&2; exit 1; }
 
-[ "${1:-}" = "--help" ] && { usage; exit 0; }
-[ "${1:-}" = "-h" ] && { usage; exit 0; }
+REPAIR=0
+case "${1:-}" in
+    ''|--)     : ;;
+    --help|-h) usage; exit 0 ;;
+    --repair)  REPAIR=1 ;;
+    *)         die "未知参数：$1（用法见 sh install.sh --help）" ;;
+esac
 # 平台差异全部收在 detect_platform 里，主流程不区分平台。
 PLATFORM=
 DEVICE_SSH_PORT=
@@ -116,19 +124,154 @@ case ":$PATH:" in
         ;;
 esac
 
+# ---------- ssh config 的标记块：全项目唯一一份模板 ----------
+# 设备侧只写一个 Host：进服务器的入口，别名就叫 `server`。每台设备只对一台服务器，
+# 再把设备名后缀贴上去纯属噪音，敲起来还长。
+# 反向隧道**不再单独占一个 Host**：端口从状态文件读、-R 在 device-tunnel 里现场拼。
+# 写进 ssh config 等于同一个端口存两份（config 一份、状态文件一份），一旦分叉症状
+# 还很隐蔽 —— 隧道绑在旧端口、台账登记的是新端口。
+# 服务器侧仍写 onboard-device-<id>：那是给服务器上的 agent 用的，它得有个名字能直接连。
+local_ssh_block() {
+    _b="# >>> device-onboard:$device_id BEGIN"
+    _e="# <<< device-onboard:$device_id END"
+    cat <<EOF
+$_b
+Host $server_alias
+    HostName $server_host
+    User $server_user
+    Port $server_port
+    IdentityFile $device_key
+    IdentitiesOnly yes
+    StrictHostKeyChecking accept-new
+    ServerAliveInterval 60
+    ServerAliveCountMax 3
+$_e
+EOF
+}
+
+remote_ssh_block() {
+    _b="# >>> device-onboard:$device_id BEGIN"
+    _e="# <<< device-onboard:$device_id END"
+    cat <<EOF
+$_b
+Host $device_alias
+    HostName 127.0.0.1
+    User $device_user
+    Port $reverse_port
+    IdentityFile ~/.ssh/device-onboard/${device_id}-server
+    IdentitiesOnly yes
+    StrictHostKeyChecking accept-new
+    ServerAliveInterval 60
+    ServerAliveCountMax 3
+$_e
+EOF
+}
+
+# 到服务器的 ssh 统一走这里：首次接入时这几个变量来自向导，--repair 时来自状态文件。
+server_ssh() {
+    ssh -i "$device_key" -o IdentitiesOnly=yes -p "$server_port" "$server_user@$server_host" "$@"
+}
+
+# 只动自己的标记块：块内整体重写，块外一个字节不碰，改前备份。
+write_local_ssh_block() {
+    _cfg="$HOME/.ssh/config"
+    _b="# >>> device-onboard:$device_id BEGIN"
+    _e="# <<< device-onboard:$device_id END"
+    mkdir -p "$HOME/.ssh"
+    _tmp=$(mktemp) || die "无法创建临时文件。"
+    if [ -f "$_cfg" ]; then
+        awk -v b="$_b" -v e="$_e" '$0 == b {skip=1; next} $0 == e {skip=0; next} !skip {print}' "$_cfg" > "$_tmp"
+        cp "$_cfg" "$_cfg.device-onboard.bak"
+        # 撞名必须明说：ssh 以先匹配到的 Host 为准，我们的块在文件末尾，
+        # 撞了就永远轮不到 —— 不报错，但行为完全不是用户以为的那个。
+        if awk -v a="$server_alias" '
+            /^[ \t]*[Hh]ost[ \t]/ { for (i = 2; i <= NF; i++) if ($i == a) hit = 1 }
+            END { exit hit ? 0 : 1 }' "$_tmp"; then
+            printf '⚠️ %s 里已经有 Host %s（在 device-onboard 区块之外）。\n' "$_cfg" "$server_alias"
+            printf '   ssh 会先用你手写的那份，本项目的连接不会生效。改掉它，或用 sh install.sh --repair 重写。\n'
+        fi
+    fi
+    local_ssh_block >> "$_tmp"
+    mv "$_tmp" "$_cfg"
+    chmod 600 "$_cfg"
+}
+
+write_remote_ssh_block() {
+    _b="# >>> device-onboard:$device_id BEGIN"
+    _e="# <<< device-onboard:$device_id END"
+    remote_ssh_block | server_ssh "set -eu; file=\"\$HOME/.ssh/config\"; tmp=\"\$(mktemp)\"; mkdir -p \"\$HOME/.ssh\"; if [ -f \"\$file\" ]; then awk -v begin='$_b' -v end='$_e' '\$0 == begin {skip=1; next} \$0 == end {skip=0; next} !skip {print}' \"\$file\" > \"\$tmp\"; cp \"\$file\" \"\$file.device-onboard.bak\"; else : > \"\$tmp\"; fi; cat >> \"\$tmp\"; mv \"\$tmp\" \"\$file\"; chmod 600 \"\$file\""
+}
+
+# ---------- --repair：按状态文件重写双方的标记块 ----------
+# 存在的理由：别名规则会演进（去掉 onboard-tunnel-*、把服务器入口改名 server），
+# 而「已有配置」那条路径刻意不碰 ~/.ssh/config —— 于是老设备上的旧块会一直留着。
+# --repair 补这个口：不重新接入、不动密钥、不重发公钥，只把标记块换成当前版本的样子。
+repair_ssh_blocks() {
+    device_id=${DEVICE_ID:-}
+    server_host=${SERVER_HOST:-}
+    server_user=${SERVER_USER:-}
+    server_port=${SERVER_PORT:-}
+    device_port=${DEVICE_PORT:-}
+    reverse_port=${REVERSE_PORT:-}
+    device_user=${DEVICE_USER:-}
+    device_key=${DEVICE_KEY:-}
+    server_alias=server
+    device_alias="onboard-device-$device_id"
+
+    [ -n "$device_id" ]   || die "状态文件里没有 DEVICE_ID。"
+    [ -n "$server_host" ] || die "状态文件里没有 SERVER_HOST。"
+    [ -n "$server_user" ] || die "状态文件里没有 SERVER_USER。"
+    [ -n "$server_port" ] || die "状态文件里没有 SERVER_PORT。"
+    [ -n "$device_user" ] || die "状态文件里没有 DEVICE_USER。"
+    [ -n "$device_key" ]  || die "状态文件里没有 DEVICE_KEY。"
+    [ -f "$device_key" ]  || die "设备密钥不在了：${device_key}（只有重跑接入才能重建）。"
+    # 端口要进 ssh config：非数字会让之后所有 ssh 直接罢工。
+    case "$reverse_port" in ''|*[!0-9]*) die "状态文件里的 REVERSE_PORT 不是数字：'$reverse_port'。" ;; esac
+    case "$device_port"  in ''|*[!0-9]*) die "状态文件里的 DEVICE_PORT 不是数字：'$device_port'。" ;; esac
+
+    printf '\n按状态文件重写 ssh config 标记块（设备 %s）…\n' "$device_id"
+    write_local_ssh_block
+    printf '✅ 设备侧：Host %s（进服务器）\n' "$server_alias"
+    if write_remote_ssh_block; then
+        printf '✅ 服务器侧：Host %s（服务器回连设备）\n' "$device_alias"
+    else
+        printf '⚠️ 服务器侧写入失败（连不上？），已跳过 —— 设备侧不受影响。\n' >&2
+    fi
+    printf '提示：服务器上的设备档案（SKILL.md）不在修复范围内，要刷新它请重新接入。\n'
+
+    # 状态文件里的别名是配置块的「不完整副本」，一并纠正 —— 否则下一次
+    # sh install.sh 还会照着旧别名打印用法提示，指到一个已经不存在的 Host。
+    if [ -f "$STATE_FILE" ]; then
+        _tmp_state=$(mktemp) || die "无法创建临时文件。"
+        grep -v -e '^SERVER_HOST_ALIAS=' -e '^TUNNEL_HOST_ALIAS=' -e '^DEVICE_HOST_ALIAS=' "$STATE_FILE" > "$_tmp_state" || true
+        printf 'SERVER_HOST_ALIAS=%s\nDEVICE_HOST_ALIAS=%s\n' "$server_alias" "$device_alias" >> "$_tmp_state"
+        chmod 600 "$_tmp_state"
+        mv "$_tmp_state" "$STATE_FILE"
+        printf '✅ 状态文件已同步别名：%s / %s\n' "$server_alias" "$device_alias"
+    fi
+}
+
 if [ -f "$STATE_FILE" ]; then
     printf '本地命令已更新。已有设备配置，跳过首次接入。\n'
     # 这条路径绝不能碰 ~/.ssh/config：配置块是「产物」，状态文件才是「源」。
     # 清掉却重建不出来，就把已经接好的设备弄瘸了。
     # shellcheck source=/dev/null
     . "$STATE_FILE"
+    if [ "$REPAIR" = 1 ]; then
+        repair_ssh_blocks
+        exit 0
+    fi
     if ! grep -qF "# >>> device-onboard:$DEVICE_ID BEGIN" "$HOME/.ssh/config" 2>/dev/null; then
         printf '\n⚠️ %s 里找不到本设备（%s）的配置块，device-tunnel 会解析不到主机。\n' "$HOME/.ssh/config" "$DEVICE_ID"
-        printf '   修复：删掉状态文件后重跑，脚本会照常重新生成 ——\n'
-        printf '     rm -rf %s && sh install.sh\n' "$CONFIG_DIR"
+        printf '   修复：用 sh install.sh --repair 只重写配置块（不动密钥、不重新接入）；\n'
+        printf '         或者删掉状态文件彻底重接：rm -rf %s && sh install.sh\n' "$CONFIG_DIR"
     fi
     printf '日常命令：device-harness（一键：隧道 + harness）、device-tunnel；在服务器上跑命令：ssh %s <命令>\n' "$SERVER_HOST_ALIAS"
     exit 0
+fi
+
+if [ "$REPAIR" = 1 ]; then
+    die "--repair 需要已有接入配置（$STATE_FILE 不存在）。首次接入直接跑 sh install.sh。"
 fi
 
 # ---------- 失败回滚（仅首次接入路径） ----------
@@ -357,9 +500,8 @@ device_pub=$(cat "$device_key.pub")
 printf '\n首次 SSH 连接将由系统提示确认主机指纹或输入密码。\n'
 printf '%s\n' "$device_pub" | ssh -p "$server_port" "$server_target" 'set -eu; umask 077; mkdir -p "$HOME/.ssh"; touch "$HOME/.ssh/authorized_keys"; key=$(cat); grep -qxF "$key" "$HOME/.ssh/authorized_keys" 2>/dev/null || printf "%s\n" "$key" >> "$HOME/.ssh/authorized_keys"; chmod 600 "$HOME/.ssh/authorized_keys"'
 
-server_ssh() {
-    ssh -i "$device_key" -o IdentitiesOnly=yes -p "$server_port" "$server_target" "$@"
-}
+# server_ssh() 定义在文件开头（--repair 也要用）：这里的 server_host / server_user /
+# server_port / device_key 已经由向导设好，函数体直接取这些变量。
 
 # 服务器端回连密钥是不是本次新建的 —— 回滚时只删本次生成的东西。
 if server_ssh "test -f \"\$HOME/$server_key_relative\"" 2>/dev/null; then
@@ -512,71 +654,11 @@ case "$device_port" in
     ''|*[!0-9]*) die "本机 sshd 端口不是有效数字：'$device_port'；为避免写坏 ~/.ssh/config，已中止。" ;;
 esac
 
-server_alias="onboard-server-$device_id"
-tunnel_alias="onboard-tunnel-$device_id"
+server_alias=server
 device_alias="onboard-device-$device_id"
-server_key_local="~/.ssh/device-onboard/${device_id}-server"
-local_begin="# >>> device-onboard:$device_id BEGIN"
-local_end="# <<< device-onboard:$device_id END"
 
-local_block=$(cat <<EOF
-$local_begin
-Host $server_alias
-    HostName $server_host
-    User $server_user
-    Port $server_port
-    IdentityFile $device_key
-    IdentitiesOnly yes
-    StrictHostKeyChecking accept-new
-    ServerAliveInterval 60
-    ServerAliveCountMax 3
-
-Host $tunnel_alias
-    HostName $server_host
-    User $server_user
-    Port $server_port
-    IdentityFile $device_key
-    IdentitiesOnly yes
-    StrictHostKeyChecking accept-new
-    RemoteForward $reverse_port localhost:$device_port
-    ExitOnForwardFailure yes
-    ServerAliveInterval 60
-    ServerAliveCountMax 3
-$local_end
-EOF
-)
-
-update_local_config() {
-    config="$HOME/.ssh/config"
-    tmp=$(mktemp)
-    if [ -f "$config" ]; then
-        awk -v begin="$local_begin" -v end="$local_end" '$0 == begin {skip=1; next} $0 == end {skip=0; next} !skip {print}' "$config" > "$tmp"
-        cp "$config" "$config.device-onboard.bak"
-    fi
-    printf '%s\n' "$local_block" >> "$tmp"
-    mv "$tmp" "$config"
-    chmod 600 "$config"
-}
-update_local_config
-
-remote_begin="# >>> device-onboard:$device_id BEGIN"
-remote_end="# <<< device-onboard:$device_id END"
-remote_block=$(cat <<EOF
-$remote_begin
-Host $device_alias
-    HostName 127.0.0.1
-    User $device_user
-    Port $reverse_port
-    IdentityFile $server_key_local
-    IdentitiesOnly yes
-    StrictHostKeyChecking accept-new
-    ServerAliveInterval 60
-    ServerAliveCountMax 3
-$remote_end
-EOF
-)
-
-printf '%s\n' "$remote_block" | server_ssh "set -eu; file=\"\$HOME/.ssh/config\"; tmp=\"\$(mktemp)\"; mkdir -p \"\$HOME/.ssh\"; if [ -f \"\$file\" ]; then awk -v begin='$remote_begin' -v end='$remote_end' '\$0 == begin {skip=1; next} \$0 == end {skip=0; next} !skip {print}' \"\$file\" > \"\$tmp\"; cp \"\$file\" \"\$file.device-onboard.bak\"; else : > \"\$tmp\"; fi; cat >> \"\$tmp\"; mv \"\$tmp\" \"\$file\"; chmod 600 \"\$file\""
+write_local_ssh_block
+write_remote_ssh_block
 
 # ---------- 服务器端各 harness 的「记忆文件」提示块（可选；失败不影响接入） ----------
 # 每个 harness 有自己的全局指令文件：
@@ -740,7 +822,6 @@ SERVER_PORT=$server_port
 DEVICE_PORT=$device_port
 REVERSE_PORT=$reverse_port
 SERVER_HOST_ALIAS=$server_alias
-TUNNEL_HOST_ALIAS=$tunnel_alias
 DEVICE_HOST_ALIAS=$device_alias
 DEVICE_KEY=$device_key
 EOF

@@ -1,9 +1,10 @@
 # 一键接入新设备（SSH 双向通道）— 方案讨论稿
 
 > 用途：作为设备接入工具的方案讨论稿，可交给任意 harness 或人工评审继续打磨。  
-> 状态：**MVP 方案已收敛，尚未实现**。
+> 状态：**已实现**（代码见 `install.sh` / `bin/`，运行流程见 `docs/flow.md`）；本文保留方案阶段的推演。
 > 当前边界：首版只支持 macOS；首次运行 `install.sh` 会安装本地命令并直接进入设备接入；服务器是唯一 AI/harness 节点；多设备协同暂不纳入首版。
-> 已确认：接入命令维护双方的 `~/.ssh/config`；设备侧提供服务器连接 Host 和反向隧道 Host；`device-tunnel` 前台启动反向 SSH；用 `ssh onboard-server-<设备名> <命令>` 在服务器上启动 Harness，`device-harness` 则是一键编排（隧道 + Harness 同生共死）。
+> 已确认：接入命令维护双方的 `~/.ssh/config`；设备侧只有 `Host server` 一个入口（反向隧道不单独占 Host，端口见状态文件）；`device-tunnel` 前台启动反向 SSH；在服务器上启动 Harness 用 `ssh server <命令>`，`device-harness` 则是一键编排（隧道 + Harness 同生共死）。
+> 下文出现的 `onboard-server-*` / `onboard-tunnel-*` 是当时的设计名，现已收敛为上面这一版。
 
 ---
 

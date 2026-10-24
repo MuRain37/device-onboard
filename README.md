@@ -54,13 +54,14 @@ flowchart LR
     CFG -.-> SSH
 ```
 
-接入成功后，两边的 `~/.ssh/config` 里各多出几个 Host：
+接入成功后，两边的 `~/.ssh/config` 里各多出一个 Host：
 
 | 别名 | 在哪用 | 干什么 |
 |---|---|---|
-| `onboard-server-<名字>` | 设备 | 进服务器 / 在服务器上跑命令 |
-| `onboard-tunnel-<名字>` | 设备 | 起反向隧道（带 `RemoteForward`） |
+| `server` | 设备 | 进服务器 / 在服务器上跑命令 |
 | `onboard-device-<名字>` | 服务器 | 通过反向隧道连回设备 |
+
+设备侧就 `server` 一个 —— 每台设备只对一台服务器，再加设备名后缀纯属噪音。**反向隧道不单独占一个 Host**：端口只在状态文件里存一份，`device-tunnel` 拼 `-R` 时现场取，免得日后与 `~/.ssh/config` 里的副本分叉。
 
 ## 快速开始
 
@@ -91,7 +92,7 @@ device-harness                      # 一键：起隧道 + 在服务器上跑 co
 device-harness claude               # 换别的 harness
 device-harness -C '~/项目' claude   # 指定服务器上的工作目录
 device-tunnel                       # 只起反向隧道，前台保持，Ctrl-C 结束
-ssh onboard-server-<名字>            # 进服务器普通 shell
+ssh server                          # 进服务器普通 shell
 ```
 
 ## 命令速查
@@ -100,9 +101,10 @@ ssh onboard-server-<名字>            # 进服务器普通 shell
 |---|---|---|
 | 首次接入 | 设备 | `sh install.sh` |
 | 重新安装本地命令 | 设备 | `sh install.sh`（检测到已有配置就跳过接入） |
+| 重写配置块（不重新接入） | 设备 | `sh install.sh --repair` |
 | 一键干活 | 设备 | `device-harness [-C <服务器目录>] [harness] [参数…]` |
 | 只开反向隧道 | 设备 | `device-tunnel` |
-| 进服务器 | 设备 | `ssh onboard-server-<名字>` |
+| 进服务器 | 设备 | `ssh server` |
 | 从服务器操作设备 | 服务器 | `ssh onboard-device-<名字> '<命令>'` |
 | 跑测试 | 任意 | `sh tests/smoke.sh` |
 
@@ -111,7 +113,7 @@ ssh onboard-server-<名字>            # 进服务器普通 shell
 这几条看着啰嗦，但每一条都是真机踩出来的。
 
 **① 就绪信号由服务器打印，不是本地瞎报。**
-`device-tunnel` 的 Host 块里有 `ExitOnForwardFailure yes`，所以只有服务器**真把端口绑上**了，才可能执行到打印「✅ 反向隧道已建立」那行。本地「我发出去了」毫无意义 —— 这是唯一能区分「隧道通了」和「端口被占」的证据。`device-harness` 等的就是这个信号，而不是轮询端口。
+`device-tunnel` 起隧道时带 `-o ExitOnForwardFailure=yes`，所以只有服务器**真把端口绑上**了，才可能执行到打印「✅ 反向隧道已建立」那行。本地「我发出去了」毫无意义 —— 这是唯一能区分「隧道通了」和「端口被占」的证据。`device-harness` 等的就是这个信号，而不是轮询端口。
 
 **② 首次接入做端到端握手，不看进程也不看端口。**
 进程活着但转发已断的情况真实存在。接入时会启动一条临时隧道，让服务器**真连回设备一次**，必须回显 `DEVICE-ONBOARD-E2E-OK` 才算通过。绑上但握手失败会立刻中止 —— 并明确告诉你「换端口没用」。
@@ -136,7 +138,7 @@ ssh onboard-server-<名字>            # 进服务器普通 shell
 |---|---|
 | `~/.config/device-onboard/config` | 本机接入配置（别名、端口、设备 ID） |
 | `~/.ssh/device-onboard/` | 设备私钥（**私钥永不出设备**） |
-| `~/.ssh/config` | 新增 `onboard-server-*` 与 `onboard-tunnel-*` Host 块 |
+| `~/.ssh/config` | 新增 `Host server` 标记块（进服务器的入口） |
 | `$DEVICE_ONBOARD_BIN_DIR` | 安装的 `device-tunnel` / `device-harness` |
 
 **服务器侧**

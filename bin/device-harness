@@ -19,7 +19,6 @@ if [ ! -f "$CONFIG_FILE" ]; then
 fi
 # shellcheck source=/dev/null
 . "$CONFIG_FILE"
-: "${TUNNEL_HOST_ALIAS:?配置缺少 TUNNEL_HOST_ALIAS}"
 : "${SERVER_HOST_ALIAS:?配置缺少 SERVER_HOST_ALIAS}"
 : "${DEVICE_ID:?配置缺少 DEVICE_ID}"
 : "${DEVICE_HOST_ALIAS:?配置缺少 DEVICE_HOST_ALIAS}"
@@ -124,7 +123,7 @@ if [ -n "${TERMUX_VERSION:-}" ]; then
 fi
 
 # 就绪信号不靠「端口在不在听」，而是等隧道自己打出的那行「✅ 反向隧道已建立」——
-# 那是服务器亲口说的（Host 块里 ExitOnForwardFailure yes：转发真绑上才会执行到那行）。
+# 那是服务器亲口说的（device-tunnel 带 -o ExitOnForwardFailure=yes：转发真绑上才会执行到那行）。
 # Termux 上 /tmp 不可写，临时文件必须用 ${TMPDIR}。
 READY_FILE=$(mktemp "${TMPDIR:-/tmp}/device-harness.XXXXXX" 2>/dev/null || mktemp)
 tunnel_pid=

@@ -1,5 +1,9 @@
 # Device Onboard MVP 规格
 
+> **注（实现已演进，本文保留当时原貌）**：设备侧现在只写一个 `Host server`，反向隧道不再
+> 单独占 Host —— 端口只在 `~/.config/device-onboard/config` 里存一份，`device-tunnel` 拼 `-R`
+> 时现场取。当前行为以 [README](../README.md) 与 [flow.md](flow.md) 为准。
+
 ## 目标
 
 在一台 macOS 设备上运行一个 shell 脚本，建立设备与服务器之间的双向 SSH 通道。服务器是唯一的 AI 开发节点：harness、skills 和项目都保存在服务器上。

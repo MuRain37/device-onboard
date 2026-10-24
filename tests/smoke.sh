@@ -35,15 +35,48 @@ fi
 grep -q '还没有设备接入配置' /tmp/device-onboard-smoke.out
 
 cat > "$TMP_HOME/config/config" <<EOF
-SERVER_HOST_ALIAS=onboard-server-test
-TUNNEL_HOST_ALIAS=onboard-tunnel-test
+SERVER_HOST_ALIAS=server
 REVERSE_PORT=2230
 DEVICE_PORT=8022
 EOF
 
 FAKE_SSH_LOG="$TMP_HOME/ssh.log" PATH="$FAKE_BIN:$PATH" HOME="$TMP_HOME" DEVICE_ONBOARD_CONFIG_FILE="$TMP_HOME/config/config" sh "$ROOT/bin/device-tunnel"
-grep -q 'onboard-tunnel-test' "$TMP_HOME/ssh.log"
 grep -q '反向隧道已建立' "$TMP_HOME/ssh.log"
+# 转发参数由命令自己拼，不再存进 ssh config —— 端口只有一个真相（状态文件）。
+grep -q -- '-R 2230:localhost:8022' "$TMP_HOME/ssh.log" || {
+    printf 'device-tunnel 没把 -R <server>:localhost:<device> 拼进命令行：\n' >&2
+    sed 's/^/  /' "$TMP_HOME/ssh.log" >&2
+    exit 1
+}
+# 就绪信号的全部依据：转发绑不上就让 ssh 直接退出
+grep -q -- 'ExitOnForwardFailure=yes' "$TMP_HOME/ssh.log" || {
+    printf 'device-tunnel 没带 ExitOnForwardFailure（「已建立」就不再是服务器亲口说的）\n' >&2
+    exit 1
+}
+# 连的是 server 这个别名
+case "$(head -1 "$TMP_HOME/ssh.log")" in
+    *' server '*) : ;;
+    *) printf 'device-tunnel 没连 server 别名：%s\n' "$(head -1 "$TMP_HOME/ssh.log")" >&2; exit 1 ;;
+esac
+
+# 端口不是数字时必须在拼 -R 之前挡住，说清是哪个变量的错
+cat > "$TMP_HOME/config/badport" <<EOF
+SERVER_HOST_ALIAS=server
+REVERSE_PORT=22x0
+DEVICE_PORT=8022
+EOF
+: > "$TMP_HOME/ssh.log"
+if FAKE_SSH_LOG="$TMP_HOME/ssh.log" PATH="$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
+        DEVICE_ONBOARD_CONFIG_FILE="$TMP_HOME/config/badport" sh "$ROOT/bin/device-tunnel" \
+        >/tmp/device-onboard-smoke.out 2>&1; then
+    printf 'REVERSE_PORT 不是数字时 device-tunnel 竟然照跑\n' >&2
+    exit 1
+fi
+grep -q 'REVERSE_PORT 不是数字' /tmp/device-onboard-smoke.out
+if [ -s "$TMP_HOME/ssh.log" ]; then
+    printf '端口非法时不该发起 ssh（会撞出 Bad forwarding specification）\n' >&2
+    exit 1
+fi
 
 # --- 平台识别 ---
 
@@ -123,24 +156,25 @@ if grep -q 'device-onboard' "$TMP_HOME/.ssh/config"; then
 fi
 rm -f "$TMP_HOME/.ssh/config"
 
-# --- 回归防护：写进 ssh config 的 RemoteForward 必须能被 ssh 解析 ---
-# ssh_config 里得用两参数写法 `RemoteForward <listen> <target>`；
-# 把命令行那种 `2230:localhost:8022` 的单参数写法抄进来，ssh 会直接拒绝启动。
-fwd_line=$(grep -m1 '^    RemoteForward ' "$ROOT/install.sh")
-if [ -z "$fwd_line" ]; then
-    printf 'install.sh 里找不到 RemoteForward 模板，测试需要更新\n' >&2
+# --- 回归防护：device-tunnel 拼出来的 -R 必须能被 ssh 解析 ---
+# 曾经踩过：把 ssh_config 的双参数写法（`RemoteForward <listen> <target>`）和命令行的
+# 单参数写法（`-R 2230:localhost:8022`）混着用，ssh 直接拒绝启动、而且报错指向别处。
+# 现在转发参数只在命令里出现一次，就把那一份拿去给真 ssh 验。
+fwd_spec=$(grep -m1 -o '\-R "\${REVERSE_PORT}:localhost:\${DEVICE_PORT}"' "$ROOT/bin/device-tunnel")
+if [ -z "$fwd_spec" ]; then
+    printf 'bin/device-tunnel 里找不到 -R 的拼法，测试需要更新\n' >&2
     exit 1
 fi
-fwd_line=$(printf '%s\n' "$fwd_line" | sed 's/\$reverse_port/2230/g; s/\$device_port/8022/g')
-cfg=$(mktemp)
-printf 'Host fwdtest\n%s\n' "$fwd_line" > "$cfg"
-if ! ssh -F "$cfg" -G fwdtest >/dev/null 2>&1; then
-    printf 'RemoteForward 这行 ssh 解析不了：%s\n' "$fwd_line" >&2
-    ssh -F "$cfg" -G fwdtest 2>&1 | head -2 >&2
-    rm -f "$cfg"
+fwd_spec=$(printf '%s\n' "$fwd_spec" | sed 's/.*-R "//; s/"$//; s/\${REVERSE_PORT}/2230/g; s/\${DEVICE_PORT}/8022/g')
+if ! ssh -G -R "$fwd_spec" localhost >/dev/null 2>&1; then
+    printf 'ssh 解析不了这个转发规格：-R %s\n' "$fwd_spec" >&2
     exit 1
 fi
-rm -f "$cfg"
+# 反向通道不再单独占 Host：设备侧 config 里出现 RemoteForward 就说明又退回老写法了
+if grep -q '^    RemoteForward' "$ROOT/install.sh"; then
+    printf 'install.sh 又往 ssh config 里写 RemoteForward 了（端口会变成两处真相）\n' >&2
+    exit 1
+fi
 
 # --- 命令要装进本来就处于 PATH 里的目录（Termux 上是 $PREFIX/bin）---
 mkdir -p "$TMP_HOME/prefix/bin"
@@ -230,12 +264,29 @@ printf '1\nxiaomitest\n134.175.91.169\nubuntu\n22\n' | env FAKE_SSH_LOG="$TMP_HO
 grep -q '设备接入完成' /tmp/device-onboard-smoke.out
 grep -q 'DEVICE-ONBOARD-E2E-OK' "$TMP_HOME/full.log"
 [ -f "$TMP_HOME/p9/config" ] || { printf '状态文件没写出来\n' >&2; exit 1; }
-grep -q 'Host onboard-tunnel-xiaomitest' "$TMP_HOME/.ssh/config" || { printf '反向隧道 Host 没写进配置\n' >&2; exit 1; }
+
+# 设备侧只写一个 Host，且名字就叫 server
+grep -qx 'Host server' "$TMP_HOME/.ssh/config" || {
+    printf '设备侧没有写出 Host server：\n' >&2
+    sed 's/^/  /' "$TMP_HOME/.ssh/config" >&2
+    exit 1
+}
+# 反向通道不占 Host：config 里既不该有 onboard-tunnel，也不该有 RemoteForward
+if grep -q 'onboard-tunnel\|RemoteForward' "$TMP_HOME/.ssh/config"; then
+    printf '设备侧 config 里又出现了反向隧道的痕迹（端口会出现两处真相）：\n' >&2
+    grep -n 'onboard-tunnel\|RemoteForward' "$TMP_HOME/.ssh/config" | sed 's/^/  /' >&2
+    exit 1
+fi
+grep -qx 'SERVER_HOST_ALIAS=server' "$TMP_HOME/p9/config" || { printf '状态文件里的别名不是 server\n' >&2; exit 1; }
+if grep -q 'TUNNEL_HOST_ALIAS' "$TMP_HOME/p9/config"; then
+    printf '状态文件里还在写 TUNNEL_HOST_ALIAS（已经不需要了）\n' >&2
+    exit 1
+fi
 
 # 生成的配置必须能被真 ssh 解析 —— 昨晚就是这条把整台设备弄瘸的
-if ! ssh -F "$TMP_HOME/.ssh/config" -G onboard-tunnel-xiaomitest >/dev/null 2>&1; then
+if ! ssh -F "$TMP_HOME/.ssh/config" -G server >/dev/null 2>&1; then
     printf '生成的 ~/.ssh/config 解析不过：\n' >&2
-    ssh -F "$TMP_HOME/.ssh/config" -G onboard-tunnel-xiaomitest 2>&1 | head -3 >&2
+    ssh -F "$TMP_HOME/.ssh/config" -G server 2>&1 | head -3 >&2
     exit 1
 fi
 
@@ -517,8 +568,15 @@ grep -q 'REVERSE_PORT=2231' "$TMP_HOME/p10/config" || {
     sed 's/^/  /' "$TMP_HOME/p10/config" 2>/dev/null >&2
     exit 1
 }
-grep -q 'RemoteForward 2231 localhost' "$TMP_HOME/x10/.ssh/config" || {
-    printf '设备侧隧道块没写 2231\n' >&2
+# 端口只该落在状态文件（device-tunnel 从这里读、自己拼 -R）——
+# 设备侧 config 里再出现 RemoteForward 就是又退回「两处真相」了
+if grep -q 'RemoteForward' "$TMP_HOME/x10/.ssh/config"; then
+    printf '设备侧 config 里又写了 RemoteForward（端口会出现两处真相）：\n' >&2
+    sed 's/^/  /' "$TMP_HOME/x10/.ssh/config" 2>/dev/null >&2
+    exit 1
+fi
+grep -qx 'Host server' "$TMP_HOME/x10/.ssh/config" || {
+    printf '设备侧没有 Host server：\n' >&2
     sed 's/^/  /' "$TMP_HOME/x10/.ssh/config" 2>/dev/null >&2
     exit 1
 }
@@ -823,6 +881,124 @@ grep -q '确认不是本设备' "$TMP_HOME/p31/out" || { printf '② 没有识�
 FAKE_CONFIG_PORTS='mac 2230' run_install_port_case "$TMP_HOME/p32"
 grep -q '^REVERSE_PORT=2231$' "$TMP_HOME/p32/cfg/config" || { printf '③ 应跳过 config 里登记给 mac 的 2230，实际: %s\n' "$(grep '^REVERSE_PORT=' "$TMP_HOME/p32/cfg/config")" >&2; exit 1; }
 grep -q '跳过端口 2230：已登记给其它设备' "$TMP_HOME/p32/out" || { printf '③ 没有用 config 台账保护别设备的端口\n' >&2; sed 's/^/  /' "$TMP_HOME/p32/out" >&2; exit 1; }
+
+# --- --repair：别名规则变了，把已经接好的设备迁移过来 ---
+# 背景：「已有配置」那条路径刻意不碰 ~/.ssh/config（怕清掉重建不出来），
+# 于是老设备上的旧块会一直留着。改名、去掉隧道 Host 之后，必须有个「不重新接入
+# 也能重写标记块」的口子，否则老设备的配置永远停在旧规则上。
+REPAIR_HOME="$TMP_HOME/r1"
+mkdir -p "$REPAIR_HOME/.ssh" "$REPAIR_HOME/cfg" "$REPAIR_HOME/keys"
+# 上一版规则的现场：服务器 Host 带设备名后缀、反向隧道单占一个 Host、
+# 块外还有用户手写的 Host keepme（必须原样保留）。
+cat > "$REPAIR_HOME/.ssh/config" <<'EOF'
+Host keepme
+    HostName example.com
+
+# >>> device-onboard:xiaomitest BEGIN
+Host onboard-server-xiaomitest
+    HostName 134.175.91.169
+    User ubuntu
+    Port 22
+    IdentityFile /old/path/xiaomitest-device
+
+Host onboard-tunnel-xiaomitest
+    HostName 134.175.91.169
+    User ubuntu
+    Port 22
+    RemoteForward 2230 localhost:8022
+    ExitOnForwardFailure yes
+# <<< device-onboard:xiaomitest END
+EOF
+: > "$REPAIR_HOME/keys/xiaomitest-device"
+cat > "$REPAIR_HOME/cfg/config" <<EOF
+DEVICE_ID=xiaomitest
+DEVICE_NAME=xiaomitest
+DEVICE_USER=mac
+SERVER_HOST=134.175.91.169
+SERVER_USER=ubuntu
+SERVER_PORT=22
+DEVICE_PORT=8022
+REVERSE_PORT=2230
+SERVER_HOST_ALIAS=onboard-server-xiaomitest
+TUNNEL_HOST_ALIAS=onboard-tunnel-xiaomitest
+DEVICE_HOST_ALIAS=onboard-device-xiaomitest
+DEVICE_KEY=$REPAIR_HOME/keys/xiaomitest-device
+EOF
+
+# 假 ssh：远端要写的 stdin 落到文件里，就能断言服务器侧写了什么
+cat > "$FAKE_BIN/ssh" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_SSH_LOG"
+case "$*" in *'.ssh/config'*) cat > "$FAKE_SSH_CAPTURE" ;; esac
+exit 0
+EOF
+chmod 755 "$FAKE_BIN/ssh"
+
+run_repair() {
+    : > "$REPAIR_HOME/remote.cfg"
+    : > "$REPAIR_HOME/ssh.log"
+    FAKE_SSH_LOG="$REPAIR_HOME/ssh.log" FAKE_SSH_CAPTURE="$REPAIR_HOME/remote.cfg" \
+        PATH="$FAKE_BIN:$PATH" HOME="$REPAIR_HOME" DEVICE_ONBOARD_CONFIG_DIR="$REPAIR_HOME/cfg" \
+        sh "$ROOT/install.sh" --repair
+}
+
+run_repair > "$REPAIR_HOME/out" 2>&1 || {
+    printf '--repair 失败了：\n' >&2
+    sed 's/^/  /' "$REPAIR_HOME/out" >&2
+    exit 1
+}
+
+grep -qx 'Host server' "$REPAIR_HOME/.ssh/config" || {
+    printf -- '--repair 没把服务器别名换成 server：\n' >&2
+    sed 's/^/  /' "$REPAIR_HOME/.ssh/config" >&2
+    exit 1
+}
+if grep -q 'onboard-tunnel\|onboard-server-xiaomitest\|RemoteForward' "$REPAIR_HOME/.ssh/config"; then
+    printf -- '--repair 没清掉上一版的别名：\n' >&2
+    sed 's/^/  /' "$REPAIR_HOME/.ssh/config" >&2
+    exit 1
+fi
+grep -qx 'Host keepme' "$REPAIR_HOME/.ssh/config" || { printf -- '--repair 动了块外的手写内容\n' >&2; exit 1; }
+
+# 重写而不是追加：标记块还得只有一个
+begin_count=$(grep -c '^# >>> device-onboard:xiaomitest BEGIN$' "$REPAIR_HOME/.ssh/config" || true)
+[ "$begin_count" = 1 ] || { printf -- '--repair 后标记块有 %s 个（应该是 1 个）\n' "$begin_count" >&2; exit 1; }
+
+grep -qx 'Host onboard-device-xiaomitest' "$REPAIR_HOME/remote.cfg" || {
+    printf -- '--repair 没重写服务器侧的回连 Host：\n' >&2
+    sed 's/^/  /' "$REPAIR_HOME/remote.cfg" >&2
+    exit 1
+}
+grep -qx 'SERVER_HOST_ALIAS=server' "$REPAIR_HOME/cfg/config" || { printf -- '--repair 没同步状态文件里的别名\n' >&2; exit 1; }
+if grep -q 'TUNNEL_HOST_ALIAS' "$REPAIR_HOME/cfg/config"; then
+    printf -- '--repair 没清掉状态文件里的 TUNNEL_HOST_ALIAS\n' >&2
+    exit 1
+fi
+
+# 幂等：再跑一次，内容一个字节都不该变
+cp "$REPAIR_HOME/.ssh/config" "$REPAIR_HOME/config.once"
+run_repair > /dev/null 2>&1 || true
+diff -q "$REPAIR_HOME/config.once" "$REPAIR_HOME/.ssh/config" >/dev/null || {
+    printf -- '--repair 不幂等：第二次跑改动了配置\n' >&2
+    exit 1
+}
+
+# 没有状态文件时必须明确报错，而不是当普通安装跑进向导
+if PATH="$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
+        DEVICE_ONBOARD_CONFIG_DIR="$TMP_HOME/nostate" DEVICE_ONBOARD_KEY_DIR="$TMP_HOME/nokeys" \
+        DEVICE_ONBOARD_BIN_DIR="$TMP_HOME/nobin" \
+        sh "$ROOT/install.sh" --repair </dev/null >/tmp/device-onboard-smoke.out 2>&1; then
+    printf '没有接入配置时 --repair 竟然成功了\n' >&2
+    exit 1
+fi
+grep -q -- '--repair 需要已有接入配置' /tmp/device-onboard-smoke.out
+
+# 未知参数要明确拒绝，别默默当普通安装跑
+if sh "$ROOT/install.sh" --wat </dev/null >/tmp/device-onboard-smoke.out 2>&1; then
+    printf '未知参数没有被拒绝\n' >&2
+    exit 1
+fi
+grep -q '未知参数' /tmp/device-onboard-smoke.out
 
 # --- 变量引用与多字节字符的边界 ---
 # macOS 的 /bin/sh 是 bash 3.2：具名变量引用后面紧跟一个汉字时，它会把那个多字节

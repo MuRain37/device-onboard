@@ -15,7 +15,7 @@
 
 方向约定：
 
-- **正控**：设备 → 服务器（`ssh onboard-server-<设备名>`）
+- **正控**：设备 → 服务器（`ssh server`）
 - **反控**：服务器 → 设备（靠设备先开一条反向隧道，再用 `ssh onboard-device-<设备名>`）
 
 设备是**主动方**：所有连接都由设备发起。服务器不需要能直接访问设备。
@@ -69,8 +69,8 @@ sequenceDiagram
     D->>S: 追加公钥到服务器 authorized_keys
     S->>D: 回传服务器的公钥
     D->>D: 写进设备 authorized_keys
-    D->>D: 写设备侧 ~/.ssh/config<br/>Host onboard-server-&lt;设备名&gt;
-    S->>S: 写服务器侧 ~/.ssh/config<br/>Host onboard-device-&lt;设备名&gt;（含 RemoteForward）
+    D->>D: 写设备侧 ~/.ssh/config<br/>Host server
+    S->>S: 写服务器侧 ~/.ssh/config<br/>Host onboard-device-&lt;设备名&gt;
     D->>S: 探测服务器装了哪些 harness（codex / claude）
     D->>S: 给每个 harness 建自己的设备档案（~/.codex 或 ~/.claude 的 skills/device-onboard/）
     D->>S: 写各自记忆文件的设备会话块（幂等）
@@ -92,6 +92,30 @@ sequenceDiagram
   回滚不管它们。`DEVICE_ONBOARD_AGENTS_MD=0` / `DEVICE_ONBOARD_CLAUDE_MD=0` 可分别跳过。
 - **首次接入路径带失败回滚**：半路挂了会按标记撤销、还原备份。
 - **"已有配置"重跑会走跳过路径**，那条路径**绝不改动** `~/.ssh/config`。
+- **别名只有两个**：设备侧 `server`（进服务器的入口），服务器侧 `onboard-device-<设备名>`
+  （给服务器上的 agent 回连设备用）。反向隧道不单独占 Host —— 端口只在状态文件里存一份，
+  `device-tunnel` 拼 `-R` 时现场取；写进 `~/.ssh/config` 就等于同一个端口存两份，日后会分叉。
+- **`sh install.sh --repair`**：因为上面那条"跳过路径不碰 ssh config"，别名规则一变，
+  老设备上的旧块就会一直留着。`--repair` 补这个口 —— 不重新接入、不动密钥，
+  只按状态文件把双方的标记块重写成当前版本的样子（顺带同步状态文件里的别名）。
+
+---
+
+## 2.5 别名规则演进时怎么办：`sh install.sh --repair`
+
+```sh
+sh install.sh --repair     # 在设备上跑，读 ~/.config/device-onboard/config
+```
+
+干三件事，都不碰密钥和公钥授权：
+
+| 步骤 | 动作 |
+|---|---|
+| ① 设备侧 | 去掉本设备的旧标记块，按当前规则重写（`Host server`），块外内容原样保留 |
+| ② 服务器侧 | 同样重写 `Host onboard-device-<设备名>`（连不上就跳过并明说） |
+| ③ 状态文件 | 纠正 `SERVER_HOST_ALIAS` / `DEVICE_HOST_ALIAS`，清掉已废弃的字段 |
+
+它**不**刷新服务器上的设备档案（SKILL.md）—— 那个要重新接入才会更新。
 
 ---
 
@@ -109,8 +133,8 @@ flowchart TD
     C2 -- 没跑 --> C3["sshd 拉起来<br/>（隧道是往外连的，sshd 死了照样连得上<br/>·结果服务器端口成空壳·）"]
     C2 -- 在跑 --> D
     C3 --> D
-    C -- 否 --> D["ssh 到服务器，带 -R 反向转发"]
-    D --> E{"转发真的绑上了吗<br/>Host 块里 ExitOnForwardFailure yes"}
+    C -- 否 --> D["ssh 到 server，带 -R <服务器端口>:localhost:<设备端口>"]
+    D --> E{"转发真的绑上了吗<br/>-o ExitOnForwardFailure=yes"}
     E -- 否 --> E1["ssh 退出，退出码非 0"]
     E -- 是 --> F["服务器打印「反向隧道已建立」<br/>这就是就绪信号"]
     F --> G["挂住不退出，直到 Ctrl-C"]
@@ -219,8 +243,9 @@ flowchart TD
 | 想做什么 | 在哪跑 | 命令 |
 |---|---|---|
 | 首次接入 | 设备 | `sh install.sh` |
+| 重写配置块（不重新接入） | 设备 | `sh install.sh --repair` |
 | 只开隧道 | 设备 | `device-tunnel` |
 | 一键干活（默认服务器家目录） | 设备 | `device-harness` |
 | 一键干活（指定服务器目录） | 设备 | `device-harness -C '~/项目'` |
-| 进服务器 | 设备 | `ssh onboard-server-<设备名>` |
+| 进服务器 | 设备 | `ssh server` |
 | 从服务器操作设备 | 服务器 | `ssh onboard-device-<设备名> '<命令>'` |
