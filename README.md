@@ -107,8 +107,9 @@ git pull && sh install.sh
 两种情况需要额外一条命令：
 
 ```sh
-sh install.sh --repair   # 只按状态文件重写双方的 config 标记块（不动密钥、不重新接入）
-                         # 别名规则变了（比如 onboard-server-* → server）就用它迁移
+sh install.sh --repair   # 不动密钥、不重新接入：重写双方的 config 标记块，并把服务器侧的
+                         # 设备档案/提示块按当前版本重铺（别名规则变了、新增支持的 harness、
+                         # 落点改了 —— 都用它迁移）
 device-uninstall && sh install.sh   # 想彻底重接（换服务器、换设备名）
 ```
 
@@ -147,7 +148,7 @@ device-harness dsh
 |---|---|---|
 | 首次接入 | 设备 | `sh install.sh` |
 | 更新工具 | 设备 | `git pull && sh install.sh`（只更新本地命令） |
-| 重写 config 标记块 | 设备 | `sh install.sh --repair` |
+| 重写 config 块 + 重铺服务器产物 | 设备 | `sh install.sh --repair` |
 | 彻底卸载 | 设备 | `device-uninstall` |
 | 只拆不装 | 设备 | `device-uninstall --keep-keys` |
 | 一键干活 | 设备 | `device-harness [-C <服务器目录>] [harness] [参数…]` |

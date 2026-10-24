@@ -99,8 +99,9 @@ sequenceDiagram
 - **别名只有两个**：设备侧 `server`（进服务器的入口），服务器侧 `onboard-device-<设备名>`
   （给服务器上的 agent 回连设备用）。反向隧道不单独占 Host —— 端口只在状态文件里存一份，
   `device-tunnel` 拼 `-R` 时现场取；写进 `~/.ssh/config` 就等于同一个端口存两份，日后会分叉。
-- **重跑只更新命令**：不重新接入、不碰 ssh config。别名规则变了用 `--repair`（只重写
-  标记块，不动密钥），要彻底重接就 `device-uninstall` 之后再跑一次 `install.sh`。
+- **重跑只更新命令**：不重新接入、不碰 ssh config。别名规则变了、新增了支持的 harness、
+  或者落点改了，都用 `--repair`（重写标记块 + 重铺服务器侧的档案/提示块，不动密钥）；
+  要彻底重接就 `device-uninstall` 之后再跑一次 `install.sh`。
 
 ---
 
@@ -300,7 +301,7 @@ flowchart TD
 |---|---|---|
 | 首次接入 | 设备 | `sh install.sh` |
 | 更新工具（只更新命令） | 设备 | `git pull && sh install.sh` |
-| 重写 config 标记块 | 设备 | `sh install.sh --repair` |
+| 重写 config 块 + 重铺服务器产物 | 设备 | `sh install.sh --repair` |
 | 彻底卸载 | 设备 | `device-uninstall` |
 | 只开隧道 | 设备 | `device-tunnel` |
 | 一键干活（默认服务器家目录） | 设备 | `device-harness` |

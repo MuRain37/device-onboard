@@ -1245,6 +1245,21 @@ if grep -q 'TUNNEL_HOST_ALIAS' "$R1/cfg/config"; then
     printf -- '--repair 没清掉状态文件里的 TUNNEL_HOST_ALIAS\n' >&2
     exit 1
 fi
+# --repair 顺带把服务器侧的档案/提示块也按当前版本重铺一遍（不必为此重新接入）
+grep -q 'reverse_port: 2230' "$R1-server/.codex/skills/device-onboard/SKILL.md" 2>/dev/null || {
+    printf -- '--repair 没补写服务器的设备档案：\n' >&2
+    ls -R "$R1-server/.codex" 2>/dev/null >&2
+    exit 1
+}
+grep -q '<!-- DEVICE-ONBOARD:xiaomitest BEGIN -->' "$R1-server/.dsh/AGENTS.md" 2>/dev/null || {
+    printf -- '--repair 没补写 dsh 的 ~/.dsh/AGENTS.md 登记块（新支持的 harness 才能这样补上）\n' >&2
+    exit 1
+}
+grep -q '<!-- DEVICE-ONBOARD-AGENTS BEGIN -->' "$R1-server/.codex/AGENTS.md" 2>/dev/null || {
+    printf -- '--repair 没补写 codex 的设备会话块\n' >&2
+    exit 1
+}
+
 # 没有状态文件时 --repair 要明确报错，而不是跑进向导
 if PATH="$UBIN:$PATH" HOME="$TMP_HOME" \
         DEVICE_ONBOARD_CONFIG_DIR="$TMP_HOME/nostate" DEVICE_ONBOARD_KEY_DIR="$TMP_HOME/nokeys" \
