@@ -139,6 +139,8 @@ device-harness dsh
 
 反向隧道照旧一起起：dsh 里那个 agent 仍然可以 `ssh onboard-device-<名字>` 回到设备上干活。
 
+**dsh 侧的「档案」长什么样**：不写 `SKILL.md`。codex/claude 有全局技能目录，dsh 的 skill 是按**会话 workdir** 发现的（`{workdir}/skills/<名字>/`），把设备登记这种全局档案塞进去既没有稳定位置、还得往用户项目目录里写东西。dsh 唯一稳定、全局读的位置是 `$DSH_HOME/AGENTS.md`（默认 `~/.dsh/AGENTS.md`），所以那儿写一块**自带端口与密钥名**的登记（一台设备一块），agent 不用再去别处查。
+
 ## 命令速查
 
 | 想做什么 | 在哪跑 | 命令 |
@@ -202,6 +204,7 @@ device-harness dsh
 | `~/.claude/skills/device-onboard/SKILL.md` | 同上，claude 一份 |
 | `~/.codex/AGENTS.md` | 「设备会话」标记块 |
 | `~/.claude/CLAUDE.md` | 「设备会话」标记块 |
+| `~/.dsh/AGENTS.md` | dsh 的「设备接入登记」块（一台一块；dsh 的 skill 是按会话 workdir 发现的，没有全局档案文件） |
 | `~/.ssh/config` | `onboard-device-*` 回连 Host 块 |
 
 档案只记重新生成 SSH 配置所需的最小信息（设备名、端口、钥匙名、用户），**不存私钥**，也**不存易变字段**（比如「最后在线时间」—— 那是运行时事实，用时现场查）。
@@ -219,6 +222,7 @@ device-harness dsh
 | `DEVICE_ONBOARD_REVERSE_PORT_START` / `_END` | `2230` / `2299` | 反向端口范围（避开手工占用的低位端口） |
 | `DEVICE_ONBOARD_AGENTS_MD` | `1` | 设为 `0` 跳过服务器 `~/.codex/AGENTS.md` 的标记块 |
 | `DEVICE_ONBOARD_CLAUDE_MD` | `1` | 设为 `0` 跳过服务器 `~/.claude/CLAUDE.md` 的标记块 |
+| `DEVICE_ONBOARD_DSH_MD` | `1` | 设为 `0` 跳过服务器 `~/.dsh/AGENTS.md` 的设备登记块 |
 
 `device-harness dsh` 另有两个（在设备上跑命令时用）：
 

@@ -162,6 +162,21 @@ done
 if [ "$others" = 1 ]; then
     echo WARN_MEMORY_SHARED
 fi
+# ④.5 dsh 的 ~/.dsh/AGENTS.md：登记块按设备分（一台一块）
+df="$HOME/.dsh/AGENTS.md"
+if [ -f "$df" ] && grep -qF "<!-- DEVICE-ONBOARD:$id BEGIN -->" "$df" 2>/dev/null; then
+    t=$(mktemp)
+    awk -v id="$id" '
+        $0 == "<!-- DEVICE-ONBOARD:" id " BEGIN -->" { skip = 1; next }
+        $0 == "<!-- DEVICE-ONBOARD:" id " END -->"   { skip = 0; next }
+        !skip { print }
+    ' "$df" > "$t" && mv "$t" "$df"
+    if [ -z "$(tr -d '[:space:]' < "$df")" ]; then
+        rm -f "$df" && echo REMOVED_DSH_MD
+    else
+        echo STRIPPED_DSH_BLOCK
+    fi
+fi
 # ⑤ 服务器侧回连密钥
 if [ "$keep" = 1 ]; then
     echo KEPT_SERVER_KEY
@@ -192,6 +207,8 @@ else
             REMOVED_SKILL)             printf '   已删除设备档案\n' ;;
             REMOVED_MEMORY_FILE)       printf '   已删除记忆文件里的空壳（原来只有这个块）\n' ;;
             STRIPPED_MEMORY_BLOCK)     printf '   已去掉记忆文件里的设备会话块\n' ;;
+            REMOVED_DSH_MD)            printf '   已删除 dsh 的 ~/.dsh/AGENTS.md（只有本设备的登记块）\n' ;;
+            STRIPPED_DSH_BLOCK)        printf '   已去掉 dsh ~/.dsh/AGENTS.md 里本设备的登记块\n' ;;
             WARN_MEMORY_SHARED)        printf '   ⚠️ 记忆文件的提示块是共用的（不分设备），已一并删除 ——\n     这台服务器上还有别的设备，它的会话会少这条提示；需要的话在那台设备上重跑一次 sh install.sh 恢复。\n' ;;
             KEPT_SERVER_KEY)           printf '   留着服务器侧回连密钥（--keep-keys）\n' ;;
             REMOVED_SERVER_KEY)        printf '   已删除服务器侧回连密钥\n' ;;

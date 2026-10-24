@@ -26,6 +26,7 @@ usage() {
   DEVICE_ONBOARD_REVERSE_PORT_START 反向端口起点（默认 2230，避开手工占用的低位端口）
   DEVICE_ONBOARD_REVERSE_PORT_END   反向端口终点（默认 2299）
   DEVICE_ONBOARD_AGENTS_MD          设为 0 跳过服务器 ~/.codex/AGENTS.md 的设备会话块（默认开启）
+  DEVICE_ONBOARD_DSH_MD             设为 0 跳过服务器 ~/.dsh/AGENTS.md 的设备登记块（默认开启）
 EOF
 }
 
@@ -785,11 +786,70 @@ $skill_block" | server_ssh "set -eu; file=\"$_file\"; tmp=\"\$(mktemp)\"; awk -v
     fi
 }
 
+# ---------- dsh（DeepSeek Harness）的设备提示块 ----------
+# 落点跟 codex/claude 不一样，别照抄：dsh 的 skill 是按**会话 workdir** 发现的
+# （{workdir}/skills/<name>/），没有全局技能根 —— 把「设备登记」这种全局档案放进去
+# 既没有稳定位置，还得往用户的项目目录里写东西。它唯一稳定、全局读的位置是
+# $DSH_HOME/AGENTS.md（默认 ~/.dsh/AGENTS.md），所以这里不写 SKILL.md，
+# 直接把「这台设备 + 它的端口/密钥名」写进那个文件，一台设备一块。
+# 标记带 device_id：多台设备各占一块，重跑幂等替换，块外内容一律不动。
+setup_dsh_md() {
+    _begin="<!-- DEVICE-ONBOARD:$device_id BEGIN -->"
+    _end="<!-- DEVICE-ONBOARD:$device_id END -->"
+    # 未引用的 heredoc：$_begin/$_end 与设备参数在本地展开；块里若出现反引号要写 \`
+    # （未引用 heredoc 里反引号会被当命令替换跑在本地）。这里干脆不用反引号。
+    _script=$(cat <<DSH_SCRIPT_EOF
+set +e
+file="\$HOME/.dsh/AGENTS.md"
+mkdir -p "\$(dirname "\$file")" 2>/dev/null || { echo DSH_FAIL; exit 0; }
+tmp=\$(mktemp 2>/dev/null) || { echo DSH_FAIL; exit 0; }
+if [ -f "\$file" ]; then
+    awk -v b='$_begin' -v e='$_end' '\$0 == b {skip=1; next} \$0 == e {skip=0; next} !skip {print}' "\$file" > "\$tmp" 2>/dev/null || { rm -f "\$tmp"; echo DSH_FAIL; exit 0; }
+fi
+cat >> "\$tmp" <<'DSH_BLOCK_EOF'
+$_begin
+## 设备接入登记：${device_name}（device-onboard）
+
+被 device-harness dsh 拉起来的会话，环境里带着这些变量：
+
+    DEVICE_ONBOARD_ID=<设备名>                    本次会话来自哪台设备
+    DEVICE_ONBOARD_DEVICE_ALIAS=onboard-device-$device_id
+    DEVICE_ONBOARD_DEVICE_CWD / DEVICE_ONBOARD_DEVICE_CWD_REL
+        用户当时在设备上的目录，只在那台设备上有效
+    回到设备：ssh \$DEVICE_ONBOARD_DEVICE_ALIAS
+
+这台设备（${device_name}，ID ${device_id}）的接入参数：
+
+| 项 | 值 |
+|---|---|
+| 设备上的服务器入口别名 | server |
+| 服务器地址 | $server_user@$server_host:$server_port |
+| 设备 sshd 端口 | 设备 localhost:$device_port |
+| 反向隧道 | 服务器 127.0.0.1:$reverse_port → 设备 localhost:$device_port |
+| 服务器侧公钥 | ~/.ssh/device-onboard/$device_id-server |
+| 设备侧密钥名 | $device_id-device（私钥永不出设备） |
+
+没有 DEVICE_ONBOARD_ID → 这是普通服务器会话，不要假设来自设备。
+设备上的文件用 ssh onboard-device-$device_id / scp 读写。DEVICE_ONBOARD_DEVICE_CWD 是那台
+设备上的路径，本机并不存在，别在这里 cd 它。
+$_end
+DSH_BLOCK_EOF
+mv "\$tmp" "\$file" 2>/dev/null && chmod 600 "\$file" 2>/dev/null && echo DSH_OK || { rm -f "\$tmp"; echo DSH_FAIL; }
+DSH_SCRIPT_EOF
+)
+    _out=$(printf '%s\n' "$_script" | server_ssh 'sh -s' 2>&1 || true)
+    case "$_out" in
+        *DSH_OK*) printf '✅ 已写入服务器 ~/.dsh/AGENTS.md 的设备提示块。\n' ;;
+        *)        printf '警告：写入服务器 ~/.dsh/AGENTS.md 失败，跳过（不影响接入）。\n' >&2 ;;
+    esac
+    return 0
+}
+
 # ---------- 探测服务器装了哪些 harness，按需分发档案与提示块 ----------
 # 装了哪个就给哪个铺一份；一个都没装就什么都不写（不凭空建目录）。
 # 探测不能只靠 command -v：非交互 ssh 的 PATH 未必含 ~/.local/bin，所以补几个常见绝对路径。
 detect_server_harnesses() {
-    server_ssh 'for c in codex claude; do
+    server_ssh 'for c in codex claude dsh; do
         if command -v "$c" >/dev/null 2>&1 || [ -x "$HOME/.local/bin/$c" ] || [ -x "/usr/local/bin/$c" ]; then
             printf "%s " "$c"
         fi
@@ -798,7 +858,7 @@ detect_server_harnesses() {
 
 harnesses=$(detect_server_harnesses)
 if [ -z "$harnesses" ]; then
-    printf '提示：服务器上没探测到 codex / claude，跳过设备档案与提示块的写入。\n'
+    printf '提示：服务器上没探测到 codex / claude / dsh，跳过设备档案与提示块的写入。\n'
 fi
 for _harness in $harnesses; do
     case "$_harness" in
@@ -816,6 +876,14 @@ for _harness in $harnesses; do
                 printf '按 DEVICE_ONBOARD_CLAUDE_MD=0 跳过 claude 的提示块。\n'
             else
                 setup_server_md '$HOME/.claude/CLAUDE.md' '<!-- DEVICE-ONBOARD-CLAUDE BEGIN -->' '<!-- DEVICE-ONBOARD-CLAUDE END -->' '~/.claude/skills/device-onboard/SKILL.md'
+            fi
+            ;;
+        dsh)
+            # 只有提示块，没有设备档案 —— 理由见 setup_dsh_md 上面那段。
+            if [ "${DEVICE_ONBOARD_DSH_MD:-1}" = "0" ]; then
+                printf '按 DEVICE_ONBOARD_DSH_MD=0 跳过 dsh 的提示块。\n'
+            else
+                setup_dsh_md
             fi
             ;;
     esac

@@ -124,6 +124,7 @@ device-uninstall --keep-keys   # 拆掉派生产物，留密钥与双方的授�
 | 设备 | 设备密钥（`--keep-keys` 时留）、状态文件与配置目录 |
 | 服务器 | `~/.ssh/config` 回连区块；`authorized_keys` 里本设备公钥；回连密钥（`--keep-keys` 时留） |
 | 服务器 | 设备档案里本设备那一块（没有别的设备了就整个档案目录删掉）；记忆文件里的设备会话块（文件因此变空就连文件删掉） |
+| 服务器 | `~/.dsh/AGENTS.md` 里本设备的登记块（文件因此变空就连文件删掉） |
 
 两个坑写在这儿免得再踩：
 
@@ -277,6 +278,9 @@ flowchart TD
 
 - **设备档案**：`~/.codex/skills/device-onboard/SKILL.md` 与
   `~/.claude/skills/device-onboard/SKILL.md`（只给探测到的 harness 建；内容完全相同）
+- **dsh 的登记**：`~/.dsh/AGENTS.md` 里的设备块（一台一块，**自带端口与密钥名**）。
+  dsh 不给 `SKILL.md`：它的 skill 是按会话 workdir 发现的（`{workdir}/skills/`），
+  没有全局技能根；全局可读的只有 `$DSH_HOME/AGENTS.md`
   —— 一个 skill 记所有设备，每台一个块；还有一个放在所有设备块之外的
   **共享约定块**，说明"本次会话来自哪台设备"以环境变量形式传进来
   （`DEVICE_ONBOARD_ID`、`DEVICE_ONBOARD_DEVICE_ALIAS`）。

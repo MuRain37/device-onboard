@@ -208,7 +208,7 @@ esac
 # harness 探测（install.sh 会问服务器装了哪些 harness）：默认当装了 codex，
 # 老用例行为不变；新用例用 FAKE_HARNESSES 指定（可含 claude，或留空）。
 case "$*" in
-    *'for c in codex claude'*) printf '%s' "${FAKE_HARNESSES-codex}" ;;
+    *'for c in codex claude dsh'*) printf '%s' "${FAKE_HARNESSES-codex}" ;;
 esac
 exit 0
 EOF
@@ -841,7 +841,7 @@ case "$*" in
         exec sh -c "$last"
         ;;
 esac
-case "$*" in *'for c in codex claude'*) printf '%s' "${FAKE_HARNESSES-}" ;; esac
+case "$*" in *'for c in codex claude dsh'*) printf '%s' "${FAKE_HARNESSES-}" ;; esac
 exit 0
 EOF
 cat > "$FAKE_BIN/sshd" <<'EOF'
@@ -899,6 +899,47 @@ if [ -e "$TMP_HOME/h32/.codex" ] || [ -e "$TMP_HOME/h32/.claude" ]; then
 fi
 grep -q '没探测到' "$TMP_HOME/h32/out" || { printf '没探测到 harness 时没有提示\n' >&2; sed 's/^/  /' "$TMP_HOME/h32/out" >&2; exit 1; }
 
+# ④ 只装 dsh：写 ~/.dsh/AGENTS.md 的登记块，但**不写 SKILL.md**
+# dsh 的 skill 是按会话 workdir 发现的（{workdir}/skills/），没有全局技能根；
+# 设备登记这种全局档案只能落在 $DSH_HOME/AGENTS.md，所以它没有档案文件。
+run_install_with_harnesses 'dsh' "$TMP_HOME/h33"
+DSH_MD="$TMP_HOME/h33/.dsh/AGENTS.md"
+[ -f "$DSH_MD" ] || { printf '只装 dsh 却没写 ~/.dsh/AGENTS.md：\n' >&2; sed 's/^/  /' "$TMP_HOME/h33/out" >&2; exit 1; }
+grep -q '<!-- DEVICE-ONBOARD:xiaomitest BEGIN -->' "$DSH_MD" || { printf 'dsh 登记块缺起始标记\n' >&2; exit 1; }
+grep -q '<!-- DEVICE-ONBOARD:xiaomitest END -->' "$DSH_MD" || { printf 'dsh 登记块缺结束标记\n' >&2; exit 1; }
+grep -q 'DEVICE_ONBOARD_ID' "$DSH_MD" || { printf 'dsh 登记块没说明身份变量\n' >&2; exit 1; }
+grep -q 'ssh \$DEVICE_ONBOARD_DEVICE_ALIAS' "$DSH_MD" || { printf 'dsh 登记块没给出回连方式\n' >&2; exit 1; }
+# 端口/密钥名是「没有档案文件」的补偿：dsh 侧必须自带这些，否则什么都查不到
+grep -q '127.0.0.1:2230' "$DSH_MD" || { printf 'dsh 登记块没写反向端口\n' >&2; sed 's/^/  /' "$DSH_MD" >&2; exit 1; }
+grep -q 'onboard-device-xiaomitest' "$DSH_MD" || { printf 'dsh 登记块没写回连别名\n' >&2; exit 1; }
+grep -q 'xiaomitest-server' "$DSH_MD" || { printf 'dsh 登记块没写服务器侧公钥名\n' >&2; exit 1; }
+if [ -e "$TMP_HOME/h33/.dsh/skills" ]; then
+    printf '给 dsh 写了 skills/ 目录（它的 skill 是按 workdir 发现的，不该往 HOME 里塞）\n' >&2
+    exit 1
+fi
+if [ -e "$TMP_HOME/h33/.codex" ] || [ -e "$TMP_HOME/h33/.claude" ]; then
+    printf '只装了 dsh，却凭空建了 ~/.codex 或 ~/.claude\n' >&2
+    exit 1
+fi
+# 幂等：重跑只该有一块
+run_install_with_harnesses 'dsh' "$TMP_HOME/h33"
+_dsh_blocks=$(grep -c '^<!-- DEVICE-ONBOARD:xiaomitest BEGIN -->$' "$DSH_MD" || true)
+[ "$_dsh_blocks" = 1 ] || { printf '重跑后 dsh 登记块有 %s 个（应该是 1 个）\n' "$_dsh_blocks" >&2; exit 1; }
+
+# ⑤ DEVICE_ONBOARD_DSH_MD=0 → 跳过 dsh 的块（接入照常完成）
+mkdir -p "$TMP_HOME/h34"
+printf '1\nxiaomitest\n134.175.91.169\nubuntu\n22\n' | env FAKE_SSH_LOG="$TMP_HOME/h34/ssh.log" FAKE_HARNESSES='dsh' TERMUX_VERSION=0.118 \
+    PATH="$FAKE_BIN:$PATH" HOME="$TMP_HOME/h34" DEVICE_ONBOARD_DSH_MD=0 \
+    DEVICE_ONBOARD_REVERSE_PORT_START=2230 DEVICE_ONBOARD_REVERSE_PORT_END=2230 \
+    DEVICE_ONBOARD_CONFIG_DIR="$TMP_HOME/h34/cfg" DEVICE_ONBOARD_KEY_DIR="$TMP_HOME/h34/keys" DEVICE_ONBOARD_BIN_DIR="$TMP_HOME/h34/bin" \
+    sh "$ROOT/install.sh" >"$TMP_HOME/h34/out" 2>&1 || true
+grep -q '设备接入完成' "$TMP_HOME/h34/out" || { printf '跳过 dsh 块时接入没完成\n' >&2; exit 1; }
+if [ -e "$TMP_HOME/h34/.dsh/AGENTS.md" ]; then
+    printf 'DEVICE_ONBOARD_DSH_MD=0 却没跳过\n' >&2
+    exit 1
+fi
+
+
 # --- 端口候选逻辑：自己的隧道要复用，别人的要让开 ---
 # 背景（真机踩过）：清空服务器档案后重跑安装，候选里既没有「本设备登记过的端口」，
 # 也不知道别的设备登记了什么；而本设备隧道还开着 → 2230 被自己占着、bind 必然失败
@@ -907,7 +948,7 @@ cat > "$FAKE_BIN/ssh" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >> "$FAKE_SSH_LOG"
 case "$*" in *'sh -s'*) exec sh ;; esac
-case "$*" in *'for c in codex claude'*) printf '%s' "${FAKE_HARNESSES-}" ;; esac
+case "$*" in *'for c in codex claude dsh'*) printf '%s' "${FAKE_HARNESSES-}" ;; esac
 # 服务器 ~/.ssh/config 里各设备登记的端口
 case "$*" in *'Host onboard-device-'*) printf '%s' "${FAKE_CONFIG_PORTS-}" ;; esac
 # 端口占用探测：FAKE_INUSE_PORTS 里的端口「有人在听」
@@ -995,7 +1036,7 @@ esac
 case "$*" in *DEVICE-ONBOARD-E2E-OK*) printf 'DEVICE-ONBOARD-E2E-OK'; exit 0 ;; esac
 case "$*" in *反向隧道已建立*) printf '✅ 反向隧道已建立\n'; exec sleep 30 ;; esac
 case "$*" in *-R*localhost*) exec sleep 30 ;; esac
-case "$*" in *'for c in codex claude'*) printf 'codex claude'; exit 0 ;; esac
+case "$*" in *'for c in codex claude dsh'*) printf 'codex claude dsh'; exit 0 ;; esac
 # 其余「落到服务器上」的命令（生成回连密钥、写 authorized_keys、写 ssh config）：
 # 远端要跑的那一串就是最后一个参数 —— 在服务器 HOME 下跑一遍，断言才有真文件可查。
 case "$_last" in
@@ -1074,6 +1115,7 @@ assert_gone "$U1-server/.codex/skills/device-onboard/SKILL.md" '设备档案'
 assert_gone "$U1-server/.claude/skills/device-onboard/SKILL.md" '设备档案（claude 那份）'
 assert_gone "$U1-server/.codex/AGENTS.md" '记忆文件（原来只有本工具的块）'
 assert_gone "$U1-server/.claude/CLAUDE.md" '记忆文件（原来只有本工具的块）'
+assert_gone "$U1-server/.dsh/AGENTS.md" 'dsh 的设备登记块（原来只有本工具的块）'
 assert_gone "$U1-server/.ssh/device-onboard/xiaomitest-server" '服务器侧回连密钥'
 if grep -q 'device-onboard' "$U1-server/.ssh/config" 2>/dev/null; then
     printf '卸载后服务器侧 ~/.ssh/config 里还有回连区块：\n' >&2
