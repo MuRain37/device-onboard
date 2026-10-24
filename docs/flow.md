@@ -56,10 +56,9 @@ flowchart LR
 
 ## 2. 接入/更新：`install.sh`（在设备上跑）
 
-**每次运行都是先拆后装**：有旧接入就先跑 `device-uninstall --keep-keys`（拆掉命令、双方的
-config 区块、档案与提示块、状态文件，**留密钥与双方的授权行**），再从头接一遍。
-更新就只是重跑这一条命令；拆除漏了东西，更新就会把垃圾一层层堆起来，所以「拆得干净」
-本身就是被测住的性质（`tests/smoke.sh` 里有一组用例专门拆它）。
+**重跑只更新本地命令**：检测到状态文件就跳过接入，且**一个字节都不碰 `~/.ssh/config`**
+（配置块是产物，状态文件才是源；清掉却重建不出来就把设备弄瘸了）。要重写配置块用
+`sh install.sh --repair`；要彻底拆掉用 `device-uninstall`（见 §2.5）。
 
 ```mermaid
 sequenceDiagram
@@ -68,8 +67,7 @@ sequenceDiagram
     participant S as 服务器
 
     D->>D: detect_platform()<br/>Darwin → macos；Termux → termux
-    D->>D: 有旧接入？先 device-uninstall --keep-keys<br/>（拆干净，留密钥与双方授权行）
-    U->>D: 输入服务器 IP / 用户名 / 端口<br/>（默认值取自上一次的状态文件）
+    U->>D: 输入服务器 IP / 用户名 / 端口
     D->>S: ssh 登录（密码由你手输，脚本不存密码）
     D->>D: 生成密钥对（本地）
     D->>S: 追加公钥到服务器 authorized_keys
@@ -101,18 +99,21 @@ sequenceDiagram
 - **别名只有两个**：设备侧 `server`（进服务器的入口），服务器侧 `onboard-device-<设备名>`
   （给服务器上的 agent 回连设备用）。反向隧道不单独占 Host —— 端口只在状态文件里存一份，
   `device-tunnel` 拼 `-R` 时现场取；写进 `~/.ssh/config` 就等于同一个端口存两份，日后会分叉。
-- **重跑 = 先拆后装**：向导默认值取自上一次的状态文件（一路回车即可），
-  反向端口也优先复用 —— 端口就是服务器上那台 ssh 主机的身份，换了号指纹就得重认。
-  密钥和双方的授权行留着，所以更新不用重新过一次密码。
+- **重跑只更新命令**：不重新接入、不碰 ssh config。别名规则变了用 `--repair`（只重写
+  标记块，不动密钥），要彻底重接就 `device-uninstall` 之后再跑一次 `install.sh`。
 
 ---
 
 ## 2.5 卸载：`device-uninstall`
 
 ```sh
-device-uninstall               # 全拆
-device-uninstall --keep-keys   # 只拆派生产物，留密钥与双方的授权行
+device-uninstall               # 全拆：装了什么就删什么
+device-uninstall --keep-keys   # 拆掉派生产物，留密钥与双方的授权行（想留凭据重接时用）
 ```
+
+记忆文件里的「设备会话」块**不分设备**（只是一句「有 `DEVICE_ONBOARD_ID` 就是设备会话」的
+通用说明）。卸载会把它一并删掉；如果这台服务器上还登记着别的设备，脚本会明确警告 ——
+但不会替你做主保留，因为卸载的语义就是「本工具留下的东西全部消失」。
 
 拆的东西分两半，**服务器那一半必须先拆** —— 拆完本地密钥就 ssh 不上去了：
 
@@ -294,7 +295,8 @@ flowchart TD
 | 想做什么 | 在哪跑 | 命令 |
 |---|---|---|
 | 首次接入 | 设备 | `sh install.sh` |
-| 更新工具（先拆后装） | 设备 | `git pull && sh install.sh` |
+| 更新工具（只更新命令） | 设备 | `git pull && sh install.sh` |
+| 重写 config 标记块 | 设备 | `sh install.sh --repair` |
 | 彻底卸载 | 设备 | `device-uninstall` |
 | 只开隧道 | 设备 | `device-tunnel` |
 | 一键干活（默认服务器家目录） | 设备 | `device-harness` |
