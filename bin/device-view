@@ -39,7 +39,12 @@ DEVICE_HOME=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$ALIAS" 'printf %s "$HO
 [ -n "$DIR" ] || DIR=$DEVICE_HOME
 
 export DEVICE_ONBOARD_VIEW_ALIAS=$ALIAS
-exec unshare -Urm --map-root-user sh -s -- "$ROOT" "$ALIAS" "$DEVICE_HOME" "$DIR" "$@" <<'INNER'
+# 内层脚本必须写成**文件**再执行，不能用 `sh -s <<HEREDOC`：
+# 那样内层 shell 的 stdin 是那个 heredoc，harness 继承到的 stdin 不是终端，
+# 交互式 harness（codex TUI）会直接报 "stdin is not a terminal"。
+INNER_SCRIPT=$(mktemp "${TMPDIR:-/tmp}/device-view.XXXXXX") || {
+    printf '错误：建不了临时脚本。\n' >&2; exit 1; }
+cat > "$INNER_SCRIPT" <<'INNER'
 set -eu
 ROOT=$1; ALIAS=$2; MNT=$3; CWD=$4; shift 4
 REAL_HOME=$HOME
@@ -91,3 +96,6 @@ mountpoint -q "$MNT" || { printf '错误：等不到挂载就位（%s）。\n' "
 cd "$CWD" 2>/dev/null || cd "$MNT"
 "$@"
 INNER
+chmod 700 "$INNER_SCRIPT"
+trap 'rm -f "$INNER_SCRIPT"' EXIT INT TERM
+unshare -Urm --map-root-user sh "$INNER_SCRIPT" "$ROOT" "$ALIAS" "$DEVICE_HOME" "$DIR" "$@"
