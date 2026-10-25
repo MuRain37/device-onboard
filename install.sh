@@ -320,10 +320,13 @@ for id in $device_id; do
   strip "\$HOME/.codex/AGENTS.md" '<!-- DEVICE-ONBOARD-AGENTS BEGIN -->' '<!-- DEVICE-ONBOARD-AGENTS END -->'
   strip "\$HOME/.claude/CLAUDE.md" '<!-- DEVICE-ONBOARD-CLAUDE BEGIN -->' '<!-- DEVICE-ONBOARD-CLAUDE END -->'
   strip "\$HOME/.dsh/AGENTS.md" "<!-- DEVICE-ONBOARD:\$id BEGIN -->" "<!-- DEVICE-ONBOARD:\$id END -->"
-  for f in "\$HOME/.codex/skills/device-onboard/SKILL.md" "\$HOME/.claude/skills/device-onboard/SKILL.md"; do
-    strip "\$f" "<!-- DEVICE-ONBOARD:\$id BEGIN -->" "<!-- DEVICE-ONBOARD:\$id END -->"
-    [ -f "\$f" ] && ! grep -q '^<!-- DEVICE-ONBOARD:' "\$f" && rm -f "\$f"
+  # 清空之后只剩空白/为空的文件，本来就是本工具建的 → 连文件一起删，别留空壳
+  for t in "\$HOME/.codex/AGENTS.md" "\$HOME/.claude/CLAUDE.md" "\$HOME/.dsh/AGENTS.md"; do
+    [ -f "\$t" ] && [ -z "\$(tr -d '[:space:]' < "\$t")" ] && rm -f "\$t"
   done
+  # 技能档案整个目录都是本工具的产物（只放设备清单与共享约定），新版不用了直接删。
+  # 不按设备逐块剥：那样只要还有别的设备登记着，文件就留下，codex 会继续把它当 skill。
+  rm -rf "\$HOME/.codex/skills/device-onboard" "\$HOME/.claude/skills/device-onboard"
 done
 echo INSTALLED
 SV_HEAD
