@@ -60,12 +60,21 @@ cd "$REAL_HOME" 2>/dev/null || true
 
 # ② 同路径挂载
 mkdir -p "$MNT"
-sshfs -o reconnect,ServerAliveInterval=10,ServerAliveCountMax=3 -o auto_unmount \
+# -f：让 sshfs 留在前台。不加它 sshfs 会 fork 到后台，$! 拿到的是那个立刻退出的父进程，
+# 后面的 kill 就打空了 → 会话结束留一条 ssh 连接挂在设备上（实测过）。
+sshfs -f -o reconnect,ServerAliveInterval=10,ServerAliveCountMax=3 -o auto_unmount \
       "$ALIAS:$MNT" "$MNT" &
 SFS_PID=$!
 cleanup() {
-    umount "$MNT" 2>/dev/null || fusermount3 -u "$MNT" 2>/dev/null || true
-    kill "$SFS_PID" 2>/dev/null || true
+    # 顺序：先懒卸载（挂载点可能正被用），再收进程；都收不掉就 -9。
+    # 光靠 ns 消亡不够 —— sshfs 是常驻的子进程，它活着会把一条 ssh 连接留在设备上。
+    kill -TERM "$SFS_PID" 2>/dev/null || true
+    ( fusermount3 -u -z "$MNT" || umount -l "$MNT" ) >/dev/null 2>&1 || true
+    i=0
+    while kill -0 "$SFS_PID" 2>/dev/null && [ "$i" -lt 20 ]; do sleep 0.1; i=$((i + 1)); done
+    kill -9 "$SFS_PID" 2>/dev/null || true
+    pkill -9 -f "sshfs.*$MNT" 2>/dev/null || true
+    pkill -9 -f "fusermount3.*$MNT" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
