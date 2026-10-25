@@ -140,10 +140,12 @@ device-harness dsh
 
 反向隧道照旧一起起：dsh 里那个 agent 仍然可以 `ssh onboard-device-<名字>` 回到设备上干活。
 
-**设备视图（`--device-view`）：不再靠提示词让 agent 自己 `ssh`。**
-会话在服务器上开一个 **mount namespace**：设备家目录按**相同绝对路径**挂进来（`/Users/mac` → 服务器 `/Users/mac`），`/usr/bin/{bash,zsh}` 换成**转发到设备**的垫片，harness 在里面跑。于是 agent 看到的路径、读写的文件、跑的命令，全都落在设备上 —— 它不需要知道"这是远程"，也就不需要被告知（原来那套 skill + AGENTS.md 提示已经删掉）。
+**设备视图（`--device-view`）：不挂载文件系统，只把命令转发到设备。**
+会话在服务器上开一个私有 namespace，把 `/usr/bin/{bash,zsh}` 换成**转发到设备**的垫片（codex 走绝对路径起 shell，claude/dsh 走 PATH，两条都堵），harness 在里面跑。于是 agent 敲的每条 shell 命令都落在设备上执行 —— `uname` 是 `Darwin`、`cat`/`sed`/`git` 操作的都是设备上的文件。
 
-会话结束，命名空间消失，挂载和 shell 替换一起没 —— 没有"忘了卸载"这回事，`kill -9` 也不会留僵死挂载。
+**为什么不挂载**：设备的文件用命令读写就够了（`cat`/`sed`/heredoc/`python -`），而挂载要付 FUSE 的延迟、属主映射（`idmap`）、`inotify` 缺失、以及"两份真相"的风险。代价是 harness 自带的文件工具（claude 的 `Read`/`Edit`、codex 的 `apply_patch`）看不到设备文件 —— 它们会失败，agent 会改用 shell（实测：`Read` 报 ENOENT 之后它自己换成 `head` 读到了）。
+
+会话结束，命名空间消失，shell 替换一起没，不留任何挂载。
 
 ```sh
 device-harness --device-view          # 开（auto：服务器装好了就用）
@@ -212,10 +214,10 @@ DEVICE_ONBOARD_DEVICE_VIEW=0          # 等价的环境变量
 
 | 路径 | 内容 |
 |---|---|
-| `/opt/device-onboard/device-view` | 会话级启动器：建命名空间 → 同路径挂载 → 起 harness |
+| `/opt/device-onboard/device-view` | 会话级启动器：建私有命名空间 → 换 shell → 起 harness |
 | `/opt/device-onboard/shim/{sh,bash,zsh}` | 转发垫片：把命令送到设备上执行 |
 | `/opt/device-onboard/real-sh` | 私有 POSIX 壳副本（垫片的 shebang 只能指向它，否则自我递归） |
-| `/Users/<设备用户>`（同路径） | 挂载点：设备家目录挂到这里 |
+
 | `~/.ssh/config` | `onboard-device-*` 回连 Host 块 |
 
 档案只记重新生成 SSH 配置所需的最小信息（设备名、端口、钥匙名、用户），**不存私钥**，也**不存易变字段**（比如「最后在线时间」—— 那是运行时事实，用时现场查）。

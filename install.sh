@@ -266,13 +266,13 @@ repair_ssh_blocks() {
 # ---------- 「已有配置」：重跑只更新命令，不重新接入 ----------
 # 这条路径绝不能碰 ~/.ssh/config：配置块是「产物」，状态文件才是「源」。
 # 清掉却重建不出来，就把已经接好的设备弄瘸了。要重写块就用 --repair。
-# ---------- 服务器侧：设备视图（同路径挂载 + shell 转发），取代原来的 skill/AGENTS 提示 ----------
+# ---------- 服务器侧：设备视图（只做 shell 转发，不挂载文件系统） ----------
 # 落地的四样东西（都在 /opt/device-onboard，靠 sudo 装）：
 #   real-sh     一份私有的 POSIX 壳副本 —— 垫片的 shebang 只能指向它，
 #               因为 /bin/sh 在会话命名空间里会被 bind 成垫片自己（否则 ELOOP）
 #   shim/*      转发垫片（sh/bash/zsh 三个名字），把命令送进设备
 #   device-view 会话级启动器：建命名空间 → 挂同路径 → 起 harness
-# 以及一个挂载点：设备的家目录，按**相同绝对路径**建在服务器上。
+# 设备的文件一律用命令读写（cat/sed/heredoc），所以这里不需要 sshfs、也不需要挂载点。
 # 老方案（SKILL.md / AGENTS.md / CLAUDE.md / ~/.dsh/AGENTS.md 的提示块）就地清掉 ——
 # 留着会让 agent 继续被叫去 "ssh onboard-device-x"，和新方案打架。
 install_server_view() {
@@ -283,10 +283,6 @@ install_server_view() {
 set -u
 sudo -n true 2>/dev/null || { echo NO_SUDO; exit 0; }
 ROOT=/opt/device-onboard
-if ! command -v sshfs >/dev/null 2>&1; then
-    sudo -n apt-get install -y -qq sshfs >/dev/null 2>&1 || { echo NO_SSHFS; exit 0; }
-fi
-command -v sshfs >/dev/null 2>&1 || { echo NO_SSHFS; exit 0; }
 sudo -n mkdir -p "\$ROOT/shim" >/dev/null 2>&1 || { echo FAIL_MKDIR; exit 0; }
 sudo -n chown -R "\$(id -un):\$(id -gn)" "\$ROOT" 2>/dev/null
 cp /bin/dash "\$ROOT/real-sh"
@@ -307,8 +303,6 @@ cp "\$ROOT/shim/bash" "\$ROOT/shim/sh"
 cp "\$ROOT/shim/bash" "\$ROOT/shim/zsh"
 echo "$_dv" | base64 -d > "\$ROOT/device-view"
 chmod 755 "\$ROOT/real-sh" "\$ROOT/shim/bash" "\$ROOT/shim/sh" "\$ROOT/shim/zsh" "\$ROOT/device-view"
-# 挂载点：设备家目录的同路径（设备侧跑 install.sh，所以 \$HOME 就是它）
-sudo -n mkdir -p "$HOME" >/dev/null 2>&1 && sudo -n chown "\$(id -un):\$(id -gn)" "$HOME" 2>/dev/null
 # 清掉老方案留下的提示块
 strip() {
     f="\$1"; b="\$2"; e="\$3"
@@ -333,9 +327,8 @@ SV_HEAD
 )
     _out=$(printf '%s\n' "$_script" | server_ssh 'sh -s' 2>&1 || true)
     case "$_out" in
-        *INSTALLED*) printf '✅ 服务器侧设备视图已就位（/opt/device-onboard，挂载点 %s）\n' "$HOME" ;;
+        *INSTALLED*) printf '✅ 服务器侧设备视图已就位（/opt/device-onboard；只转发命令，不挂载文件）\n' ;;
         *NO_SUDO*)   printf '⚠️ 服务器上没有免密 sudo，装不了设备视图；会话会退回「普通远程会话」。\n   要启用：先在服务器上执行一次 sudo -v，或用 device-harness --no-device-view 显式关掉。\n' >&2 ;;
-        *NO_SSHFS*)  printf '⚠️ 服务器上装不了 sshfs（sudo apt-get install -y sshfs 失败），设备视图将不可用。\n' >&2 ;;
         *)           printf '⚠️ 写服务器侧设备视图失败，会话会退回「普通远程会话」。\n   输出：%s\n' "$_out" >&2 ;;
     esac
     return 0

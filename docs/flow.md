@@ -277,9 +277,11 @@ flowchart TD
 
 ## 9. 服务器侧看到什么
 
-- **设备视图**：`/opt/device-onboard/{device-view,real-sh,shim/*}` —— 会话级命名空间里
-  做「同路径挂载 + shell 转发」，harness 以为自己在设备上。原来那套 skill / AGENTS.md /
-  CLAUDE.md / `~/.dsh/AGENTS.md` 的提示块已经不再写，安装时会就地把残留清掉
+- **设备视图**：`/opt/device-onboard/{device-view,real-sh,shim/*}` —— 会话级私有
+  命名空间里把 shell 换成转发垫片，harness 敲的每条命令都落在设备上执行。
+  **不挂载文件系统**（设备的文件用命令读写；这样没有 FUSE 延迟/属主映射/僵死挂载）。
+  原来那套 skill / AGENTS.md / CLAUDE.md / `~/.dsh/AGENTS.md` 的提示块已经不再写，
+  安装时会就地把残留清掉
   —— 一个 skill 记所有设备，每台一个块；还有一个放在所有设备块之外的
   **共享约定块**，说明"本次会话来自哪台设备"以环境变量形式传进来
   （`DEVICE_ONBOARD_ID`、`DEVICE_ONBOARD_DEVICE_ALIAS`）。

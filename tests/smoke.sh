@@ -1140,7 +1140,7 @@ mkdir -p "$TMP_HOME/vw"
 cat > "$FAKE_BIN/ssh" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >> "$FAKE_SSH_LOG"
-case "$*" in *'device-view'*'sshfs'*) exit "${FAKE_VIEW_READY:-0}" ;; esac
+case "$*" in *'test -x /opt/device-onboard/device-view'*) exit "${FAKE_VIEW_READY:-0}" ;; esac
 case "$*" in *反向隧道已建立*) printf '✅ 反向隧道已建立\n'; exec sleep 30 ;; esac
 case "$*" in *-R*localhost*) exec sleep 30 ;; esac
 exit 0

@@ -1,15 +1,18 @@
 #!/bin/sh
-# device-view —— 在服务器上给「远程会话」开一个设备视图。
+# device-view —— 给这个会话一个「命令落到设备上」的视图。**不挂载任何文件系统。**
 #
-# 三件事，**全都只在这个会话自己的命名空间里生效**，会话结束就一起消失：
-#   ① 把设备家目录按「相同绝对路径」挂进来（sshfs 走反向隧道）
-#   ② 把 /usr/bin/{bash,zsh} 换成转发到设备的垫片
-#   ③ 在这个视图里执行给定命令（harness）
+# 做的两件事（都只在会话自己的命名空间里生效，退出即消失）：
+#   ① /usr/bin/{bash,zsh} 换成转发垫片（codex 走绝对路径起 shell）
+#   ② PATH 前置垫片目录（claude/dsh 按名字找 shell）
+#
+# 为什么不挂载：设备上的文件一律用命令读写（cat / sed / heredoc / python -），
+# 这些命令已经转发到设备上执行 —— 挂载只会引入 FUSE 的延迟、属主映射和
+# 「两份真相」的坑，而 harness 自带文件工具能看到的路径本来也不该由我们伪造。
 #
 # 用法（在服务器上跑）：
 #   device-view [--alias <回连 Host 别名>] [-C <目录>] -- <命令…>
 #
-# 需要：sshfs、/dev/fuse、放行的 unprivileged userns；挂载点要事先由 install.sh 建好。
+# 需要：可用的 unprivileged userns（用来在私有命名空间里替换 shell）。
 set -eu
 
 ROOT=${DEVICE_ONBOARD_VIEW_ROOT:-/opt/device-onboard}
@@ -30,79 +33,35 @@ done
 for f in "$ROOT/real-sh" "$ROOT/shim/bash" "$ROOT/shim/zsh"; do
     [ -x "$f" ] || { printf '错误：缺少 %s，先跑 install.sh。\n' "$f" >&2; exit 1; }
 done
-command -v sshfs >/dev/null 2>&1 || { printf '错误：服务器上没有 sshfs（sudo apt-get install -y sshfs）。\n' >&2; exit 1; }
-
-# 挂载点 = 设备的家目录（同路径）。问设备一次，不猜。
-DEVICE_HOME=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$ALIAS" 'printf %s "$HOME"' 2>/dev/null) || {
-    printf '错误：连不上设备（%s）—— 检查反向隧道是否在跑。\n' "$ALIAS" >&2; exit 1; }
-[ -n "$DEVICE_HOME" ] || { printf '错误：取不到设备的家目录。\n' >&2; exit 1; }
-[ -n "$DIR" ] || DIR=$DEVICE_HOME
 
 export DEVICE_ONBOARD_VIEW_ALIAS=$ALIAS
+
 # 内层脚本必须写成**文件**再执行，不能用 `sh -s <<HEREDOC`：
-# 那样内层 shell 的 stdin 是那个 heredoc，harness 继承到的 stdin 不是终端，
-# 交互式 harness（codex TUI）会直接报 "stdin is not a terminal"。
+# 那样内层 shell 的 stdin 是 heredoc，交互式 harness 会报 "stdin is not a terminal"。
 INNER_SCRIPT=$(mktemp "${TMPDIR:-/tmp}/device-view.XXXXXX") || {
     printf '错误：建不了临时脚本。\n' >&2; exit 1; }
 cat > "$INNER_SCRIPT" <<'INNER'
 set -eu
-ROOT=$1; ALIAS=$2; MNT=$3; CWD=$4; shift 4
-REAL_HOME=$HOME
+ROOT=$1; CWD=$2; shift 2
 
 # ① 让 getpwuid(0) 的家目录指向真实用户的家
 #    （ns 里我们是 uid 0，否则 ssh 会去 /root 找 config / known_hosts / 私钥）
 mkdir -p /tmp/doview.$$
-sed 's|^\(root:x:0:0:root:\)/root:|\1'"$REAL_HOME"':|' /etc/passwd > /tmp/doview.$$/passwd
+sed 's|^\(root:x:0:0:root:\)/root:|\1'"$HOME"':|' /etc/passwd > /tmp/doview.$$/passwd
 mount --bind /tmp/doview.$$/passwd /etc/passwd
 
 # ② shell 替换：只影响本命名空间。宿主上的 /usr/bin/bash 一个字节都没动。
-#    两条路都要堵：按名字从 PATH 找的（claude 用 sh -c），和走绝对路径的（codex 用 /usr/bin/bash -lc）。
+#    两条路都要堵：按名字从 PATH 找的（claude 用 sh -c），和走绝对路径的（codex 用 bash -lc）。
 for s in bash zsh; do
     [ -e "/usr/bin/$s" ] && mount --bind "$ROOT/shim/$s" "/usr/bin/$s"
 done
 PATH="$ROOT/shim:$PATH"; export PATH
-cd "$REAL_HOME" 2>/dev/null || true
 
-# ② 同路径挂载（DEVICE_ONBOARD_VIEW_NO_MOUNT=1 可跳过：只做 shell 转发，不挂文件）
-if [ "${DEVICE_ONBOARD_VIEW_NO_MOUNT:-0}" = 1 ]; then
-    printf '注意：跳过了文件挂载（只转发命令）—— harness 自带的读写文件工具会看不到设备文件。\n' >&2
-    cd "${HOME:-/}" 2>/dev/null || true
-    "$@"
-    exit $?
-fi
-mkdir -p "$MNT"
-# -f：让 sshfs 留在前台。不加它 sshfs 会 fork 到后台，$! 拿到的是那个立刻退出的父进程，
-# 后面的 kill 就打空了 → 会话结束留一条 ssh 连接挂在设备上（实测过）。
-sshfs -f -o reconnect,ServerAliveInterval=10,ServerAliveCountMax=3 -o auto_unmount \
-      -o idmap=user \
-      "$ALIAS:$MNT" "$MNT" &
-SFS_PID=$!
-cleanup() {
-    # 顺序：先懒卸载（挂载点可能正被用），再收进程；都收不掉就 -9。
-    # 光靠 ns 消亡不够 —— sshfs 是常驻的子进程，它活着会把一条 ssh 连接留在设备上。
-    kill -TERM "$SFS_PID" 2>/dev/null || true
-    ( fusermount3 -u -z "$MNT" || umount -l "$MNT" ) >/dev/null 2>&1 || true
-    i=0
-    while kill -0 "$SFS_PID" 2>/dev/null && [ "$i" -lt 20 ]; do sleep 0.1; i=$((i + 1)); done
-    kill -9 "$SFS_PID" 2>/dev/null || true
-    pkill -9 -f "sshfs.*$MNT" 2>/dev/null || true
-    pkill -9 -f "fusermount3.*$MNT" 2>/dev/null || true
-}
-trap cleanup EXIT INT TERM
-
-# 就绪信号：看它是不是真的挂上了，不看进程在不在
-i=0
-while [ "$i" -lt 100 ]; do
-    mountpoint -q "$MNT" && break
-    kill -0 "$SFS_PID" 2>/dev/null || { printf '错误：sshfs 退出了，挂载失败。\n' >&2; exit 1; }
-    sleep 0.1; i=$((i + 1))
-done
-mountpoint -q "$MNT" || { printf '错误：等不到挂载就位（%s）。\n' "$MNT" >&2; exit 1; }
-
-# ③ 在设备那一侧的同路径目录里跑
-cd "$CWD" 2>/dev/null || cd "$MNT"
+# ③ 工作目录：设备上的路径在这台服务器上并不存在（没有挂载），落在服务器家目录即可；
+#    「用户当时在设备上的哪个目录」由 DEVICE_ONBOARD_DEVICE_CWD 环境变量告诉 agent。
+cd "$CWD" 2>/dev/null || cd "$HOME" 2>/dev/null || :
 "$@"
 INNER
 chmod 700 "$INNER_SCRIPT"
 trap 'rm -f "$INNER_SCRIPT"' EXIT INT TERM
-unshare -Urm --map-root-user sh "$INNER_SCRIPT" "$ROOT" "$ALIAS" "$DEVICE_HOME" "$DIR" "$@"
+unshare -Urm --map-root-user sh "$INNER_SCRIPT" "$ROOT" "${DIR:-$HOME}" "$@"
