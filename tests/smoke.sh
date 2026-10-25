@@ -1143,6 +1143,8 @@ printf '%s\n' "$*" >> "$FAKE_SSH_LOG"
 case "$*" in *'test -x /opt/device-onboard/device-view'*) exit "${FAKE_VIEW_READY:-0}" ;; esac
 case "$*" in *反向隧道已建立*) printf '✅ 反向隧道已建立\n'; exec sleep 30 ;; esac
 case "$*" in *-R*localhost*) exec sleep 30 ;; esac
+case "$*" in *'ss -ltn'*) printf '9230' ;; esac
+case "$*" in *'dsh web'*) printf 'dsh web: http://127.0.0.1:9230/?token=X\n' ;; esac
 exit 0
 EOF
 chmod 755 "$FAKE_BIN/ssh"
@@ -1161,6 +1163,32 @@ grep -q '/opt/device-onboard/real-sh -c' "$TMP_HOME/vw.log" || {
     printf '没有用 real-sh 包一层（复合命令会被当成一个可执行文件名）：\n' >&2; sed 's/^/  /' "$TMP_HOME/vw.log" >&2; exit 1; }
 grep -q 'codex --no-daemon' "$TMP_HOME/vw.log" || {
     printf '视图模式把 harness 命令丢了：\n' >&2; sed 's/^/  /' "$TMP_HOME/vw.log" >&2; exit 1; }
+
+# 视图模式下按 harness 追加「禁用文件工具」的参数（不写进任何持久配置）
+: > "$TMP_HOME/vw4.log"
+env FAKE_SSH_LOG="$TMP_HOME/vw4.log" TERMUX_VERSION=0.118 PATH="$TMP_HOME/b9:$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
+    DEVICE_ONBOARD_CONFIG_FILE="$TMP_HOME/p9/config" DEVICE_ONBOARD_DEVICE_VIEW=1 \
+    sh "$TMP_HOME/b9/device-harness" claude -p hi > /dev/null 2>&1 || true
+grep -q -- '--disallowedTools Read,Write,Edit,MultiEdit,NotebookEdit,Glob,Grep' "$TMP_HOME/vw4.log" || {
+    printf '视图里没给 claude 禁用文件工具（它会把文件写到服务器上）：\n' >&2
+    sed 's/^/  /' "$TMP_HOME/vw4.log" >&2; exit 1; }
+
+: > "$TMP_HOME/vw5.log"
+env FAKE_SSH_LOG="$TMP_HOME/vw5.log" TERMUX_VERSION=0.118 PATH="$TMP_HOME/b9:$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
+    DEVICE_ONBOARD_DSH_WAIT=5 FAKE_WEB_PORT=9230 DEVICE_ONBOARD_CONFIG_FILE="$TMP_HOME/p9/config" DEVICE_ONBOARD_DEVICE_VIEW=1 \
+    sh "$TMP_HOME/b9/device-harness" dsh > /dev/null 2>&1 || true
+grep -q -- 'dsh web --patch /opt/device-onboard/view-nofs.yml' "$TMP_HOME/vw5.log" || {
+    printf '视图里没给 dsh 叠加 --patch（它的文件工具会读到服务器）：\n' >&2
+    sed 's/^/  /' "$TMP_HOME/vw5.log" >&2; exit 1; }
+
+# 关掉视图时不追加任何这类参数（不能污染普通会话）
+: > "$TMP_HOME/vw6.log"
+env FAKE_SSH_LOG="$TMP_HOME/vw6.log" TERMUX_VERSION=0.118 PATH="$TMP_HOME/b9:$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
+    DEVICE_ONBOARD_CONFIG_FILE="$TMP_HOME/p9/config" DEVICE_ONBOARD_DEVICE_VIEW=0 \
+    sh "$TMP_HOME/b9/device-harness" claude -p hi > /dev/null 2>&1 || true
+if grep -q -- '--disallowedTools' "$TMP_HOME/vw6.log"; then
+    printf '关掉视图后仍然改了 claude 的参数\n' >&2; exit 1
+fi
 
 # 显式要求视图、但服务器上装不了 → 必须报错，不能偷偷降级成普通会话
 if env FAKE_SSH_LOG="$TMP_HOME/vw.log" FAKE_VIEW_READY=1 TERMUX_VERSION=0.118 PATH="$TMP_HOME/b9:$FAKE_BIN:$PATH" HOME="$TMP_HOME" \

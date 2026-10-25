@@ -303,6 +303,18 @@ cp "\$ROOT/shim/bash" "\$ROOT/shim/sh"
 cp "\$ROOT/shim/bash" "\$ROOT/shim/zsh"
 echo "$_dv" | base64 -d > "\$ROOT/device-view"
 chmod 755 "\$ROOT/real-sh" "\$ROOT/shim/bash" "\$ROOT/shim/sh" "\$ROOT/shim/zsh" "\$ROOT/device-view"
+# 设备视图会话里用 --patch 叠加的 overlay：禁掉 dsh 的文件读写工具，逼 agent 走 shell。
+# 它是每次启动的参数，不改 ~/.dsh/profiles 里的持久配置。
+cat > "\$ROOT/view-nofs.yml" <<'NOFS_EOF'
+# 设备视图会话专用：禁掉文件读写类工具（命令已转发到设备，文件请用 shell 操作）
+- id: tool-fs
+  disabled: true
+- id: tool-fs-search
+  disabled: true
+- id: tool-str-replace-editor
+  disabled: true
+NOFS_EOF
+chmod 644 "\$ROOT/view-nofs.yml"
 # 清掉老方案留下的提示块
 strip() {
     f="\$1"; b="\$2"; e="\$3"

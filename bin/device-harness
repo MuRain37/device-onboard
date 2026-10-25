@@ -237,6 +237,19 @@ fi
 if [ "$WEB_MODE" = 1 ]; then
     printf '隧道就绪。在服务器上启动 dsh web（Ctrl-C 结束，dsh web 与隧道一起收）…\n\n'
 else
+# 视图模式下，禁用 harness「自己写服务器文件系统」的工具 —— 否则它会静默写到服务器上
+# （实测 codex 用相对路径 apply_patch 时就是这么干的）。这些开关都是每次启动的参数，
+# 不写进任何持久配置。
+if [ -n "$VIEW_CMD" ]; then
+    case "$HARNESS_CMD" in
+        claude*) RUN_CMD="$RUN_CMD --disallowedTools Read,Write,Edit,MultiEdit,NotebookEdit,Glob,Grep " ;;
+        # codex 没有可用的开关：apply_patch_tool_type 是模型元数据，不是配置项；
+        # 用只读沙箱会连带挡住 ssh（控制 socket）和 shell。风险：相对路径的 apply_patch
+        # 会悄悄写到服务器当前目录，绝对设备路径则会被它自己拒掉（可见）。
+        # dsh 的文件工具在 web 路径里用 --patch 关，见 run_web_session。
+    esac
+fi
+
 printf '隧道就绪。在服务器上启动 %s（退出后隧道自动收起）…\n\n' "$HARNESS_CMD"
 fi
 
@@ -313,8 +326,11 @@ run_web_session() {
     # dsh web 是服务器上的进程，凭「杀掉本地 ssh」收不干净 —— 实测：ssh 断了之后
     # node 那个进程还在，端口一直占着（它不听 SIGHUP）。所以远端自己带一个 trap：
     # 会话收到 HUP/TERM 就把 dsh web 一起带走。本地 ssh 断连 → sshd 给会话发 HUP → 收干净。
+    # 视图模式下禁掉 dsh 的文件工具（--patch 是每次启动的叠加层，不改 profile 配置）
+    _view_patch=
+    [ -n "$VIEW_CMD" ] && _view_patch="--patch /opt/device-onboard/view-nofs.yml "
     _web_cmd="cd \"$DIR\" || exit 1
-dsh web --no-open --host 127.0.0.1 --port $remote_port$WEB_EXTRA </dev/null &
+dsh web ${_view_patch}--no-open --host 127.0.0.1 --port $remote_port$WEB_EXTRA </dev/null &
 _web_child=\$!
 trap 'kill -TERM \"\$_web_child\" 2>/dev/null' HUP TERM INT EXIT
 wait \"\$_web_child\""
