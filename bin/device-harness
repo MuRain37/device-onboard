@@ -7,6 +7,9 @@
 #   device-harness claude             换别的 harness —— 第一个参数是什么就起什么
 #   device-harness -C '~/proj' claude 先给工作目录，再给 harness 命令
 #   device-harness claude -p '活'     命令后面的参数原样传给 harness
+#   device-harness --device-view      在「设备视图」里跑：文件按相同路径挂进服务器、
+#                                     命令转发到设备 —— 和本地几乎一致（默认 auto）
+#   device-harness --no-device-view   显式关掉设备视图，按普通远程会话跑
 #   device-harness dsh                起服务器上的 `dsh web`，并把那个网页转到设备的 127.0.0.1
 #                                     （dsh 是网页 GUI，不是终端会话 —— 见 run_web_session）
 #
@@ -29,14 +32,20 @@ fi
 #   -C <目录>   指定服务器上的工作目录（优先级最高）
 # 之后第一个参数是 harness 命令，剩余参数原样传给它。
 DIR=
+# 设备视图：auto = 服务器装好了就用；1 = 必须用（缺依赖就报错）；0 = 不用
+VIEW=${DEVICE_ONBOARD_DEVICE_VIEW:-auto}
+DIR_GIVEN=0
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        --device-view)    VIEW=1; shift ;;
+        --no-device-view) VIEW=0; shift ;;
         -C)
             if [ "$#" -lt 2 ]; then
                 printf '错误：-C 后面要跟一个目录（服务器上的路径）。\n' >&2
                 exit 2
             fi
             DIR=$2
+            DIR_GIVEN=1
             shift 2
             ;;
         *)
@@ -204,10 +213,29 @@ if ! grep -q '反向隧道已建立' "$READY_FILE" 2>/dev/null; then
     exit 1
 fi
 
+# 设备视图能不能用：看服务器上有没有启动器和 sshfs。缺了就别硬上。
+VIEW_CMD=
+if [ "$VIEW" != 0 ]; then
+if ssh -o BatchMode=yes -o ConnectTimeout=10 "$SERVER_HOST_ALIAS" \
+'test -x /opt/device-onboard/device-view && command -v sshfs >/dev/null' 2>/dev/null; then
+VIEW_CMD="/opt/device-onboard/device-view --alias $(squote "$DEVICE_HOST_ALIAS")"
+if [ "$DIR_GIVEN" = 1 ]; then
+VIEW_CMD="$VIEW_CMD -C $(squote "$DIR")"
+fi
+printf '设备视图：开（文件按相同路径挂载，命令转发到设备）\n'
+elif [ "$VIEW" = 1 ]; then
+printf '错误：要求 --device-view，但服务器上没有 /opt/device-onboard/device-view 或 sshfs —— 先跑 install.sh。\n' >&2
+exit 1
+else
+printf '提示：服务器上没装设备视图，这次按普通远程会话跑（在服务器上执行 sh install.sh 可启用）。\n'
+fi
+fi
+
+
 if [ "$WEB_MODE" = 1 ]; then
     printf '隧道就绪。在服务器上启动 dsh web（Ctrl-C 结束，dsh web 与隧道一起收）…\n\n'
 else
-    printf '隧道就绪。在服务器上启动 %s（退出后隧道自动收起）…\n\n' "$HARNESS_CMD"
+printf '隧道就绪。在服务器上启动 %s（退出后隧道自动收起）…\n\n' "$HARNESS_CMD"
 fi
 
 # 把「本次会话来自哪台设备」和「设备侧当时在哪个目录」交给 harness。变量名和用法写在
@@ -294,7 +322,7 @@ wait \"\$_web_child\""
     : > "$WEB_LOG"
     ssh -o ExitOnForwardFailure=yes -o ServerAliveInterval=60 -o ServerAliveCountMax=3 \
         -L "${local_port}:localhost:${remote_port}" \
-        "$SERVER_HOST_ALIAS" "$ENV_PREFIX $_web_cmd" >>"$WEB_LOG" 2>&1 </dev/null &
+        "$SERVER_HOST_ALIAS" "$ENV_PREFIX $([ -n "$VIEW_CMD" ] && printf '%s -- /opt/device-onboard/real-sh -c %s' "$VIEW_CMD" "$(squote "$_web_cmd")" || printf '%s' "$_web_cmd")" >>"$WEB_LOG" 2>&1 </dev/null &
     web_pid=$!
 
     # 就绪信号照样由服务器说：dsh web 自己打印的那行 `dsh web: <URL>`。
@@ -340,4 +368,9 @@ if [ "$WEB_MODE" = 1 ]; then
     exit $?
 fi
 
-ssh -t "$SERVER_HOST_ALIAS" "$ENV_PREFIX $RUN_CMD"
+if [ -n "$VIEW_CMD" ]; then
+    # 用 real-sh 而不是 sh：ns 里的 sh 是转发垫片，会把我们自己又送回设备
+    ssh -t "$SERVER_HOST_ALIAS" "$ENV_PREFIX $VIEW_CMD -- /opt/device-onboard/real-sh -c $(squote "$RUN_CMD")"
+else
+    ssh -t "$SERVER_HOST_ALIAS" "$ENV_PREFIX $RUN_CMD"
+fi

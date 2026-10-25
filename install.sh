@@ -249,7 +249,7 @@ repair_ssh_blocks() {
     # 顺手把服务器侧的设备档案/提示块也按当前版本重铺一遍：落点变了、或者新增了
     # 支持的 harness（比如 dsh），就不必为此重新接一次。
     printf '\n刷新服务器侧的设备档案与提示块…\n'
-    write_server_artifacts
+    install_server_view
 
     # 状态文件里的别名是配置块的「不完整副本」，一并纠正 —— 否则下一次
     # sh install.sh 还会照着旧别名打印用法提示，指到一个已经不存在的 Host。
@@ -266,235 +266,73 @@ repair_ssh_blocks() {
 # ---------- 「已有配置」：重跑只更新命令，不重新接入 ----------
 # 这条路径绝不能碰 ~/.ssh/config：配置块是「产物」，状态文件才是「源」。
 # 清掉却重建不出来，就把已经接好的设备弄瘸了。要重写块就用 --repair。
-# ---------- 服务器端各 harness 的「记忆文件」提示块（可选；失败不影响接入） ----------
-# 每个 harness 有自己的全局指令文件：
-#   codex  → ~/.codex/AGENTS.md   （实测 codex 只读这里，不读 ~/.agents/AGENTS.md）
-#   claude → ~/.claude/CLAUDE.md
-# 用独立标记块维护：块已存在就整体替换，不存在就追加，文件不存在就创建。
-# 绝不碰块以外的任何内容。回滚逻辑刻意不动这一块（用户裁决：回滚不管记忆文件）。
-setup_server_md() {
-    _file=$1        # 远端文件（字面量，含 ${HOME}）
-    _begin=$2       # 块起始标记
-    _end=$3         # 块结束标记
-    _skill_path=$4  # 提示块里指向的设备档案路径
-    # 未引用的 heredoc：$_file/$_begin/$_end/$_skill_path 在本地展开；块里若出现
-    # 反引号必须写成 \` —— 未引用 heredoc 里反引号会被当命令替换跑在本地（踩过）。
-    _script=$(cat <<MD_SCRIPT_EOF
-set +e
-file="$_file"
-dir=\$(dirname "\$file")
-mkdir -p "\$dir" 2>/dev/null || { echo MD_FAIL; exit 0; }
-tmp=\$(mktemp 2>/dev/null) || { echo MD_FAIL; exit 0; }
-if [ -f "\$file" ]; then
-    awk -v b='$_begin' -v e='$_end' '\$0 == b {skip=1; next} \$0 == e {skip=0; next} !skip {print}' "\$file" > "\$tmp" 2>/dev/null || { rm -f "\$tmp"; echo MD_FAIL; exit 0; }
+# ---------- 服务器侧：设备视图（同路径挂载 + shell 转发），取代原来的 skill/AGENTS 提示 ----------
+# 落地的四样东西（都在 /opt/device-onboard，靠 sudo 装）：
+#   real-sh     一份私有的 POSIX 壳副本 —— 垫片的 shebang 只能指向它，
+#               因为 /bin/sh 在会话命名空间里会被 bind 成垫片自己（否则 ELOOP）
+#   shim/*      转发垫片（sh/bash/zsh 三个名字），把命令送进设备
+#   device-view 会话级启动器：建命名空间 → 挂同路径 → 起 harness
+# 以及一个挂载点：设备的家目录，按**相同绝对路径**建在服务器上。
+# 老方案（SKILL.md / AGENTS.md / CLAUDE.md / ~/.dsh/AGENTS.md 的提示块）就地清掉 ——
+# 留着会让 agent 继续被叫去 "ssh onboard-device-x"，和新方案打架。
+install_server_view() {
+    _script=$(cat <<SV_HEAD
+set -u
+sudo -n true 2>/dev/null || { echo NO_SUDO; exit 0; }
+ROOT=/opt/device-onboard
+if ! command -v sshfs >/dev/null 2>&1; then
+    sudo -n apt-get install -y -qq sshfs >/dev/null 2>&1 || { echo NO_SSHFS; exit 0; }
 fi
-cat >> "\$tmp" <<'MD_BLOCK_EOF'
-$_begin
-## 设备会话
-本服务器的设备登记见 ${_skill_path}。
-判断本次会话来自哪台设备：看环境变量 DEVICE_ONBOARD_ID（有值就是它）。
-DEVICE_ONBOARD_DEVICE_CWD 是发起设备上用户当时的目录，DEVICE_ONBOARD_DEVICE_CWD_REL 是它
-相对该设备家目录的形式（\`.\` = 家目录本身，空 = 在家目录之外）—— 这两个只是「用户当时在哪」
-的线索，路径只在那台设备上有效，不要在这台服务器上 cd 它。
-设备上的文件用 \`ssh onboard-device-<设备名>\` / \`scp\` 读写。
-没有值 → 这是普通服务器会话，不要假设来自设备。
-$_end
-MD_BLOCK_EOF
-mv "\$tmp" "\$file" 2>/dev/null && chmod 600 "\$file" 2>/dev/null && echo MD_OK || { rm -f "\$tmp"; echo MD_FAIL; }
-MD_SCRIPT_EOF
-)
-    _out=$(printf '%s\n' "$_script" | server_ssh 'sh -s' 2>&1 || true)
-    # 提示里把远端字面量的 $HOME 显示成 ~，别让人对着 "$HOME/..." 发愣。
-    _display=$(printf '%s' "$_file" | sed 's|^\$HOME|~|')
-    case "$_out" in
-        *MD_OK*) printf '✅ 已写入服务器 %s 的设备会话提示块。\n' "$_display" ;;
-        *)       printf '警告：写入服务器 %s 失败，跳过（不影响接入）。\n' "$_display" >&2 ;;
-    esac
-    return 0
+command -v sshfs >/dev/null 2>&1 || { echo NO_SSHFS; exit 0; }
+sudo -n mkdir -p "\$ROOT/shim" >/dev/null 2>&1 || { echo FAIL_MKDIR; exit 0; }
+sudo -n chown -R "\$(id -un):\$(id -gn)" "\$ROOT" 2>/dev/null
+cp /bin/dash "\$ROOT/real-sh"
+cat > "\$ROOT/shim/bash" <<'SHIM'
+#!/opt/device-onboard/real-sh
+# 把「跑一条命令」转发到设备上执行。只在这个会话的命名空间里生效。
+set -u
+ALIAS=\${DEVICE_ONBOARD_VIEW_ALIAS:?device-view 没有传别名}
+squote() { printf "'%s'" "\$(printf '%s' "\$1" | sed "s/'/'\\\\\\\\''/g")"; }
+shell=\${0##*/}
+cmd=
+for a in "\$@"; do cmd="\$cmd \$(squote "\$a")"; done
+exec ssh -T -o BatchMode=yes -o ControlMaster=auto -o ControlPersist=300 \\
+     -o "ControlPath=/tmp/device-onboard-view-%C" \\
+     "\$ALIAS" "cd \$(squote "\${PWD:-/}") 2>/dev/null; exec \$shell\$cmd"
+SHIM
+cp "\$ROOT/shim/bash" "\$ROOT/shim/sh"
+cp "\$ROOT/shim/bash" "\$ROOT/shim/zsh"
+echo 'IyEvYmluL3NoCiMgZGV2aWNlLXZpZXcg4oCU4oCUIOWcqOacjeWKoeWZqOS4iue7meOAjOi/nOeoi+S8muivneOAjeW8gOS4gOS4quiuvuWkh+inhuWbvuOAggojCiMg5LiJ5Lu25LqL77yMKirlhajpg73lj6rlnKjov5nkuKrkvJror53oh6rlt7HnmoTlkb3lkI3nqbrpl7Tph4znlJ/mlYgqKu+8jOS8muivnee7k+adn+WwseS4gOi1t+a2iOWkse+8mgojICAg4pGgIOaKiuiuvuWkh+WutuebruW9leaMieOAjOebuOWQjOe7neWvuei3r+W+hOOAjeaMgui/m+adpe+8iHNzaGZzIOi1sOWPjeWQkemap+mBk++8iQojICAg4pGhIOaKiiAvdXNyL2Jpbi97YmFzaCx6c2h9IOaNouaIkOi9rOWPkeWIsOiuvuWkh+eahOWeq+eJhwojICAg4pGiIOWcqOi/meS4quinhuWbvumHjOaJp+ihjOe7meWumuWRveS7pO+8iGhhcm5lc3PvvIkKIwojIOeUqOazle+8iOWcqOacjeWKoeWZqOS4iui3ke+8ie+8mgojICAgZGV2aWNlLXZpZXcgWy0tYWxpYXMgPOWbnui/niBIb3N0IOWIq+WQjT5dIFstQyA855uu5b2VPl0gLS0gPOWRveS7pOKApj4KIwojIOmcgOimge+8mnNzaGZz44CBL2Rldi9mdXNl44CB5pS+6KGM55qEIHVucHJpdmlsZWdlZCB1c2VybnPvvJvmjILovb3ngrnopoHkuovlhYjnlLEgaW5zdGFsbC5zaCDlu7rlpb3jgIIKc2V0IC1ldQoKUk9PVD0ke0RFVklDRV9PTkJPQVJEX1ZJRVdfUk9PVDotL29wdC9kZXZpY2Utb25ib2FyZH0KQUxJQVM9CkRJUj0Kd2hpbGUgWyAiJCMiIC1ndCAwIF07IGRvCiAgICBjYXNlICIkMSIgaW4KICAgICAgICAtLWFsaWFzKSBBTElBUz0kezI6Py0tYWxpYXMg5ZCO6Z2i6KaB6Lef5Yir5ZCNfTsgc2hpZnQgMiA7OwogICAgICAgIC1DKSAgICAgIERJUj0kezI6Py1DIOWQjumdouimgei3n+ebruW9lX07IHNoaWZ0IDIgOzsKICAgICAgICAtLSkgICAgICBzaGlmdDsgYnJlYWsgOzsKICAgICAgICAqKSAgICAgICBicmVhayA7OwogICAgZXNhYwpkb25lClsgIiQjIiAtZ3QgMCBdIHx8IHsgcHJpbnRmICfplJnor6/vvJpkZXZpY2UtdmlldyAtLSA85ZG95Luk4oCmPlxuJyA+JjI7IGV4aXQgMjsgfQpbIC1uICIkQUxJQVMiIF0gfHwgQUxJQVM9JHtERVZJQ0VfT05CT0FSRF9ERVZJQ0VfQUxJQVM6LX0KWyAtbiAiJEFMSUFTIiBdIHx8IHsgcHJpbnRmICfplJnor6/vvJrmsqHmnIkgLS1hbGlhc++8jOS5n+ayoeaciSBERVZJQ0VfT05CT0FSRF9ERVZJQ0VfQUxJQVPjgIJcbicgPiYyOyBleGl0IDI7IH0KCmZvciBmIGluICIkUk9PVC9yZWFsLXNoIiAiJFJPT1Qvc2hpbS9iYXNoIiAiJFJPT1Qvc2hpbS96c2giOyBkbwogICAgWyAteCAiJGYiIF0gfHwgeyBwcmludGYgJ+mUmeivr++8mue8uuWwkSAlc++8jOWFiOi3kSBpbnN0YWxsLnNo44CCXG4nICIkZiIgPiYyOyBleGl0IDE7IH0KZG9uZQpjb21tYW5kIC12IHNzaGZzID4vZGV2L251bGwgMj4mMSB8fCB7IHByaW50ZiAn6ZSZ6K+v77ya5pyN5Yqh5Zmo5LiK5rKh5pyJIHNzaGZz77yIc3VkbyBhcHQtZ2V0IGluc3RhbGwgLXkgc3NoZnPvvInjgIJcbicgPiYyOyBleGl0IDE7IH0KCiMg5oyC6L2954K5ID0g6K6+5aSH55qE5a6255uu5b2V77yI5ZCM6Lev5b6E77yJ44CC6Zeu6K6+5aSH5LiA5qyh77yM5LiN54yc44CCCkRFVklDRV9IT01FPSQoc3NoIC1vIEJhdGNoTW9kZT15ZXMgLW8gQ29ubmVjdFRpbWVvdXQ9MTAgIiRBTElBUyIgJ3ByaW50ZiAlcyAiJEhPTUUiJyAyPi9kZXYvbnVsbCkgfHwgewogICAgcHJpbnRmICfplJnor6/vvJrov57kuI3kuIrorr7lpIfvvIglc++8ieKAlOKAlCDmo4Dmn6Xlj43lkJHpmqfpgZPmmK/lkKblnKjot5HjgIJcbicgIiRBTElBUyIgPiYyOyBleGl0IDE7IH0KWyAtbiAiJERFVklDRV9IT01FIiBdIHx8IHsgcHJpbnRmICfplJnor6/vvJrlj5bkuI3liLDorr7lpIfnmoTlrrbnm67lvZXjgIJcbicgPiYyOyBleGl0IDE7IH0KWyAtbiAiJERJUiIgXSB8fCBESVI9JERFVklDRV9IT01FCgpleHBvcnQgREVWSUNFX09OQk9BUkRfVklFV19BTElBUz0kQUxJQVMKZXhlYyB1bnNoYXJlIC1Vcm0gLS1tYXAtcm9vdC11c2VyIHNoIC1zIC0tICIkUk9PVCIgIiRBTElBUyIgIiRERVZJQ0VfSE9NRSIgIiRESVIiICIkQCIgPDwnSU5ORVInCnNldCAtZXUKUk9PVD0kMTsgQUxJQVM9JDI7IE1OVD0kMzsgQ1dEPSQ0OyBzaGlmdCA0ClJFQUxfSE9NRT0kSE9NRQoKIyDikaAg6K6pIGdldHB3dWlkKDApIOeahOWutuebruW9leaMh+WQkeecn+WunueUqOaIt+eahOWutgojICAgIO+8iG5zIOmHjOaIkeS7rOaYryB1aWQgMO+8jOWQpuWImSBzc2gg5Lya5Y67IC9yb290IOaJviBjb25maWcgLyBrbm93bl9ob3N0cyAvIOengemSpe+8iQpta2RpciAtcCAvdG1wL2Rvdmlldy4kJApzZWQgJ3N8Xlwocm9vdDp4OjA6MDpyb290OlwpL3Jvb3Q6fFwxJyIkUkVBTF9IT01FIic6fCcgL2V0Yy9wYXNzd2QgPiAvdG1wL2Rvdmlldy4kJC9wYXNzd2QKbW91bnQgLS1iaW5kIC90bXAvZG92aWV3LiQkL3Bhc3N3ZCAvZXRjL3Bhc3N3ZAoKIyDikaEgc2hlbGwg5pu/5o2i77ya5Y+q5b2x5ZON5pys5ZG95ZCN56m66Ze044CC5a6/5Li75LiK55qEIC91c3IvYmluL2Jhc2gg5LiA5Liq5a2X6IqC6YO95rKh5Yqo44CCCiMgICAg5Lik5p2h6Lev6YO96KaB5aC177ya5oyJ5ZCN5a2X5LuOIFBBVEgg5om+55qE77yIY2xhdWRlIOeUqCBzaCAtY++8ie+8jOWSjOi1sOe7neWvuei3r+W+hOeahO+8iGNvZGV4IOeUqCAvdXNyL2Jpbi9iYXNoIC1sY++8ieOAggpmb3IgcyBpbiBiYXNoIHpzaDsgZG8KICAgIFsgLWUgIi91c3IvYmluLyRzIiBdICYmIG1vdW50IC0tYmluZCAiJFJPT1Qvc2hpbS8kcyIgIi91c3IvYmluLyRzIgpkb25lClBBVEg9IiRST09UL3NoaW06JFBBVEgiOyBleHBvcnQgUEFUSApjZCAiJFJFQUxfSE9NRSIgMj4vZGV2L251bGwgfHwgdHJ1ZQoKIyDikaEg5ZCM6Lev5b6E5oyC6L29Cm1rZGlyIC1wICIkTU5UIgpzc2hmcyAtbyByZWNvbm5lY3QsU2VydmVyQWxpdmVJbnRlcnZhbD0xMCxTZXJ2ZXJBbGl2ZUNvdW50TWF4PTMgLW8gYXV0b191bm1vdW50IFwKICAgICAgIiRBTElBUzokTU5UIiAiJE1OVCIgJgpTRlNfUElEPSQhCmNsZWFudXAoKSB7CiAgICB1bW91bnQgIiRNTlQiIDI+L2Rldi9udWxsIHx8IGZ1c2VybW91bnQzIC11ICIkTU5UIiAyPi9kZXYvbnVsbCB8fCB0cnVlCiAgICBraWxsICIkU0ZTX1BJRCIgMj4vZGV2L251bGwgfHwgdHJ1ZQp9CnRyYXAgY2xlYW51cCBFWElUIElOVCBURVJNCgojIOWwsee7quS/oeWPt++8mueci+Wug+aYr+S4jeaYr+ecn+eahOaMguS4iuS6hu+8jOS4jeeci+i/m+eoi+WcqOS4jeWcqAppPTAKd2hpbGUgWyAiJGkiIC1sdCAxMDAgXTsgZG8KICAgIG1vdW50cG9pbnQgLXEgIiRNTlQiICYmIGJyZWFrCiAgICBraWxsIC0wICIkU0ZTX1BJRCIgMj4vZGV2L251bGwgfHwgeyBwcmludGYgJ+mUmeivr++8mnNzaGZzIOmAgOWHuuS6hu+8jOaMgui9veWksei0peOAglxuJyA+JjI7IGV4aXQgMTsgfQogICAgc2xlZXAgMC4xOyBpPSQoKGkgKyAxKSkKZG9uZQptb3VudHBvaW50IC1xICIkTU5UIiB8fCB7IHByaW50ZiAn6ZSZ6K+v77ya562J5LiN5Yiw5oyC6L295bCx5L2N77yIJXPvvInjgIJcbicgIiRNTlQiID4mMjsgZXhpdCAxOyB9CgojIOKRoiDlnKjorr7lpIfpgqPkuIDkvqfnmoTlkIzot6/lvoTnm67lvZXph4zot5EKY2QgIiRDV0QiIDI+L2Rldi9udWxsIHx8IGNkICIkTU5UIgoiJEAiCklOTkVSCg==' | base64 -d > "\$ROOT/device-view"
+chmod 755 "\$ROOT/real-sh" "\$ROOT/shim/bash" "\$ROOT/shim/sh" "\$ROOT/shim/zsh" "\$ROOT/device-view"
+# 挂载点：设备家目录的同路径（设备侧跑 install.sh，所以 \$HOME 就是它）
+sudo -n mkdir -p "$HOME" >/dev/null 2>&1 && sudo -n chown "\$(id -un):\$(id -gn)" "$HOME" 2>/dev/null
+# 清掉老方案留下的提示块
+strip() {
+    f="\$1"; b="\$2"; e="\$3"
+    [ -f "\$f" ] || return 0
+    grep -qF "\$b" "\$f" 2>/dev/null || return 0
+    t=\$(mktemp); awk -v b="\$b" -v e="\$e" '\$0==b{skip=1;next} \$0==e{skip=0;next} !skip{print}' "\$f" > "\$t" && mv "\$t" "\$f"
 }
-
-# 设备档案的两块文本（每台设备一块 + 一个共享约定块）。
-# 首次接入与 --repair 都要用，抽成函数，别两处各拼一份。
-# 注意内部不缩进：下面的 heredoc 结束符必须顶格，缩进会让它认不出来。
-build_skill_blocks() {
-skill_begin="<!-- DEVICE-ONBOARD:$device_id BEGIN -->"
-skill_end="<!-- DEVICE-ONBOARD:$device_id END -->"
-skill_block=$(cat <<EOF
-$skill_begin
-device_name: $device_name
-server_host: $server_host
-server_user: $server_user
-server_ssh_port: $server_port
-device_ssh_port: $device_port
-reverse_port: $reverse_port
-device_key_name: $device_id-device
-server_key_name: $device_id-server
-$skill_end
-EOF
-)
-# 共享约定。**必须放在设备块之外**：档案是多设备共用的，写进某一个设备块里，
-# 第二台设备接进来时就看不到了。
-conv_begin='<!-- DEVICE-ONBOARD-CONVENTION BEGIN -->'
-conv_end='<!-- DEVICE-ONBOARD-CONVENTION END -->'
-conv_block=$(cat <<EOF
-$conv_begin
-## 本次会话来自哪台设备
-
-如果本次会话是被 \`device-harness\` 拉起来的，环境里带着这些变量：
-
-    DEVICE_ONBOARD_ID=<设备名>                        例如 xiaomi
-    DEVICE_ONBOARD_DEVICE_ALIAS=onboard-device-<设备名>
-    DEVICE_ONBOARD_DEVICE_CWD=<设备上当时的绝对路径>   例如 /Users/mac/workspace
-    DEVICE_ONBOARD_DEVICE_CWD_REL=<相对设备家目录>     例如 workspace；"." = 家目录本身；空 = 家目录之外
-
-也就是说：这台服务器对面的那一侧，就是发起本次会话的那台设备。可以直接回去：
-
-    ssh "\$DEVICE_ONBOARD_DEVICE_ALIAS"
-
-DEVICE_ONBOARD_DEVICE_CWD 只是「用户当时站在哪」这条线索，**它是那台设备上的路径，
-这台服务器上并不存在** —— 不要在这里 cd 它。要读那儿的文件，把那个路径带过去：
-
-    ssh "\$DEVICE_ONBOARD_DEVICE_ALIAS" "cd <DEVICE_ONBOARD_DEVICE_CWD 的值> && ls"
-
-没有这些变量，说明本次会话不是从设备侧（device-harness）进来的，例如手动 ssh 上来。
-$conv_end
-EOF
-)
-# ---------- 设备档案（SKILL.md）：按 harness 分发 ----------
-# 每个 harness 有自己的技能目录，内容完全相同，只是落点不同。
-write_server_skill() {
-    _dir=$1                       # 远端技能目录（字面量，含 ${HOME}）
-    _file="$_dir/SKILL.md"
-    if server_ssh "test -f \"$_file\"" 2>/dev/null; then
-        # 已有档案：只替换共享约定块与本设备那一块，其它内容原样保留
-        printf '%s\n' "$conv_block
-$skill_block" | server_ssh "set -eu; file=\"$_file\"; tmp=\"\$(mktemp)\"; awk -v begin='$conv_begin' -v end='$conv_end' '\$0 == begin {skip=1; next} \$0 == end {skip=0; next} !skip {print}' \"\$file\" | awk -v begin='$skill_begin' -v end='$skill_end' '\$0 == begin {skip=1; next} \$0 == end {skip=0; next} !skip {print}' > \"\$tmp\"; cp \"\$file\" \"\$file.device-onboard.bak\"; cat >> \"\$tmp\"; mv \"\$tmp\" \"\$file\"" 2>&1 || true
-    else
-        # 新档案：头部在本地拼好（带 frontmatter，真换行），整体送过去落盘。
-        # 不在远端用 printf 拼 —— 那需要多层反斜杠转义，极易写出乱码。
-        SKILL_WAS_NEW=1
-        {
-            printf -- '---\n'
-            printf -- 'name: device-onboard\n'
-            printf -- 'description: SSH devices on this server (incl. which one this session is from).\n'
-            printf -- '---\n\n'
-            printf -- '# Device Onboard\n\n'
-            printf '%s\n' "$conv_block"
-            printf '\n'
-            printf '%s\n' "$skill_block"
-        } | server_ssh "set -eu; dir=\"$_dir\"; mkdir -p \"\$dir\"; cat > \"\$dir/SKILL.md\"; chmod 600 \"\$dir/SKILL.md\"" 2>&1 || true
-    fi
-}
-
-# ---------- dsh（DeepSeek Harness）的设备提示块 ----------
-# 落点跟 codex/claude 不一样，别照抄：dsh 的 skill 是按**会话 workdir** 发现的
-# （{workdir}/skills/<name>/），没有全局技能根 —— 把「设备登记」这种全局档案放进去
-# 既没有稳定位置，还得往用户的项目目录里写东西。它唯一稳定、全局读的位置是
-# $DSH_HOME/AGENTS.md（默认 ~/.dsh/AGENTS.md），所以这里不写 SKILL.md，
-# 直接把「这台设备 + 它的端口/密钥名」写进那个文件，一台设备一块。
-# 标记带 device_id：多台设备各占一块，重跑幂等替换，块外内容一律不动。
-setup_dsh_md() {
-    _begin="<!-- DEVICE-ONBOARD:$device_id BEGIN -->"
-    _end="<!-- DEVICE-ONBOARD:$device_id END -->"
-    # 未引用的 heredoc：$_begin/$_end 与设备参数在本地展开；块里若出现反引号要写 \`
-    # （未引用 heredoc 里反引号会被当命令替换跑在本地）。这里干脆不用反引号。
-    _script=$(cat <<DSH_SCRIPT_EOF
-set +e
-file="\$HOME/.dsh/AGENTS.md"
-mkdir -p "\$(dirname "\$file")" 2>/dev/null || { echo DSH_FAIL; exit 0; }
-tmp=\$(mktemp 2>/dev/null) || { echo DSH_FAIL; exit 0; }
-if [ -f "\$file" ]; then
-    awk -v b='$_begin' -v e='$_end' '\$0 == b {skip=1; next} \$0 == e {skip=0; next} !skip {print}' "\$file" > "\$tmp" 2>/dev/null || { rm -f "\$tmp"; echo DSH_FAIL; exit 0; }
-fi
-cat >> "\$tmp" <<'DSH_BLOCK_EOF'
-$_begin
-## 设备接入登记：${device_name}（device-onboard）
-
-被 device-harness dsh 拉起来的会话，环境里带着这些变量：
-
-    DEVICE_ONBOARD_ID=<设备名>                    本次会话来自哪台设备
-    DEVICE_ONBOARD_DEVICE_ALIAS=onboard-device-$device_id
-    DEVICE_ONBOARD_DEVICE_CWD / DEVICE_ONBOARD_DEVICE_CWD_REL
-        用户当时在设备上的目录，只在那台设备上有效
-    回到设备：ssh \$DEVICE_ONBOARD_DEVICE_ALIAS
-
-这台设备（${device_name}，ID ${device_id}）的接入参数：
-
-| 项 | 值 |
-|---|---|
-| 设备上的服务器入口别名 | server |
-| 服务器地址 | $server_user@$server_host:$server_port |
-| 设备 sshd 端口 | 设备 localhost:$device_port |
-| 反向隧道 | 服务器 127.0.0.1:$reverse_port → 设备 localhost:$device_port |
-| 服务器侧公钥 | ~/.ssh/device-onboard/$device_id-server |
-| 设备侧密钥名 | $device_id-device（私钥永不出设备） |
-
-没有 DEVICE_ONBOARD_ID → 这是普通服务器会话，不要假设来自设备。
-设备上的文件用 ssh onboard-device-$device_id / scp 读写。DEVICE_ONBOARD_DEVICE_CWD 是那台
-设备上的路径，本机并不存在，别在这里 cd 它。
-$_end
-DSH_BLOCK_EOF
-mv "\$tmp" "\$file" 2>/dev/null && chmod 600 "\$file" 2>/dev/null && echo DSH_OK || { rm -f "\$tmp"; echo DSH_FAIL; }
-DSH_SCRIPT_EOF
+for id in $device_id; do
+  strip "\$HOME/.codex/AGENTS.md" '<!-- DEVICE-ONBOARD-AGENTS BEGIN -->' '<!-- DEVICE-ONBOARD-AGENTS END -->'
+  strip "\$HOME/.claude/CLAUDE.md" '<!-- DEVICE-ONBOARD-CLAUDE BEGIN -->' '<!-- DEVICE-ONBOARD-CLAUDE END -->'
+  strip "\$HOME/.dsh/AGENTS.md" "<!-- DEVICE-ONBOARD:\$id BEGIN -->" "<!-- DEVICE-ONBOARD:\$id END -->"
+  for f in "\$HOME/.codex/skills/device-onboard/SKILL.md" "\$HOME/.claude/skills/device-onboard/SKILL.md"; do
+    strip "\$f" "<!-- DEVICE-ONBOARD:\$id BEGIN -->" "<!-- DEVICE-ONBOARD:\$id END -->"
+    [ -f "\$f" ] && ! grep -q '^<!-- DEVICE-ONBOARD:' "\$f" && rm -f "\$f"
+  done
+done
+echo INSTALLED
+SV_HEAD
 )
     _out=$(printf '%s\n' "$_script" | server_ssh 'sh -s' 2>&1 || true)
     case "$_out" in
-        *DSH_OK*) printf '✅ 已写入服务器 ~/.dsh/AGENTS.md 的设备提示块。\n' ;;
-        *)        printf '警告：写入服务器 ~/.dsh/AGENTS.md 失败，跳过（不影响接入）。\n' >&2 ;;
+        *INSTALLED*) printf '✅ 服务器侧设备视图已就位（/opt/device-onboard，挂载点 %s）\n' "$HOME" ;;
+        *NO_SUDO*)   printf '⚠️ 服务器上没有免密 sudo，装不了设备视图；会话会退回「普通远程会话」。\n   要启用：先在服务器上执行一次 sudo -v，或用 device-harness --no-device-view 显式关掉。\n' >&2 ;;
+        *NO_SSHFS*)  printf '⚠️ 服务器上装不了 sshfs（sudo apt-get install -y sshfs 失败），设备视图将不可用。\n' >&2 ;;
+        *)           printf '⚠️ 写服务器侧设备视图失败，会话会退回「普通远程会话」。\n   输出：%s\n' "$_out" >&2 ;;
     esac
     return 0
-}
-
-# ---------- 探测服务器装了哪些 harness，按需分发档案与提示块 ----------
-# 装了哪个就给哪个铺一份；一个都没装就什么都不写（不凭空建目录）。
-# 探测不能只靠 command -v：非交互 ssh 的 PATH 未必含 ~/.local/bin，所以补几个常见绝对路径。
-}
-
-detect_server_harnesses() {
-    server_ssh 'for c in codex claude dsh; do
-        if command -v "$c" >/dev/null 2>&1 || [ -x "$HOME/.local/bin/$c" ] || [ -x "/usr/local/bin/$c" ]; then
-            printf "%s " "$c"
-        fi
-    done' 2>/dev/null || true
-}
-
-# 检测服务器上装了哪些 harness，逐个铺设备档案/提示块。
-# 首次接入与 --repair 都走这里 —— 落点变了只有一份实现。
-write_server_artifacts() {
-    # 档案/提示块的文本只拼一次，下面按 harness 分发时直接复用
-    build_skill_blocks
-    harnesses=$(detect_server_harnesses)
-    if [ -z "$harnesses" ]; then
-        printf '提示：服务器上没探测到 codex / claude / dsh，跳过设备档案与提示块的写入。\n'
-    fi
-    for _harness in $harnesses; do
-        case "$_harness" in
-            codex)
-                write_server_skill '$HOME/.codex/skills/device-onboard'
-                if [ "${DEVICE_ONBOARD_AGENTS_MD:-1}" = "0" ]; then
-                    printf '按 DEVICE_ONBOARD_AGENTS_MD=0 跳过 codex 的提示块。\n'
-                else
-                    setup_server_md '$HOME/.codex/AGENTS.md' '<!-- DEVICE-ONBOARD-AGENTS BEGIN -->' '<!-- DEVICE-ONBOARD-AGENTS END -->' '~/.codex/skills/device-onboard/SKILL.md'
-                fi
-                ;;
-            claude)
-                write_server_skill '$HOME/.claude/skills/device-onboard'
-                if [ "${DEVICE_ONBOARD_CLAUDE_MD:-1}" = "0" ]; then
-                    printf '按 DEVICE_ONBOARD_CLAUDE_MD=0 跳过 claude 的提示块。\n'
-                else
-                    setup_server_md '$HOME/.claude/CLAUDE.md' '<!-- DEVICE-ONBOARD-CLAUDE BEGIN -->' '<!-- DEVICE-ONBOARD-CLAUDE END -->' '~/.claude/skills/device-onboard/SKILL.md'
-                fi
-                ;;
-            dsh)
-                # 只有提示块，没有设备档案 —— 理由见 setup_dsh_md 上面那段。
-                if [ "${DEVICE_ONBOARD_DSH_MD:-1}" = "0" ]; then
-                    printf '按 DEVICE_ONBOARD_DSH_MD=0 跳过 dsh 的提示块。\n'
-                else
-                    setup_dsh_md
-                fi
-                ;;
-        esac
-    done
 }
 
 if [ -f "$STATE_FILE" ]; then
@@ -907,7 +745,7 @@ device_alias="onboard-device-$device_id"
 write_local_ssh_block
 write_remote_ssh_block
 
-write_server_artifacts
+install_server_view
 
 cat > "$STATE_FILE" <<EOF
 DEVICE_ID=$device_id

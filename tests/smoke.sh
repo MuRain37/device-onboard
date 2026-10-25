@@ -7,6 +7,8 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 # 两边不一致就会把「产品行为正确」误判成「路径没传到」。整棵树统一用物理路径。
 TMP_HOME=$(mktemp -d)
 TMP_HOME=$(CDPATH= cd -- "$TMP_HOME" && pwd -P)
+# 老用例验的是「不带设备视图」时的命令组合；视图本身另有专门的用例（见文件后段）。
+DEVICE_ONBOARD_DEVICE_VIEW=0; export DEVICE_ONBOARD_DEVICE_VIEW
 FAKE_BIN="$TMP_HOME/fake-bin"
 mkdir -p "$FAKE_BIN" "$TMP_HOME/config"
 trap 'rm -rf "$TMP_HOME"' EXIT
@@ -249,68 +251,6 @@ if ! ssh -F "$TMP_HOME/.ssh/config" -G server >/dev/null 2>&1; then
     ssh -F "$TMP_HOME/.ssh/config" -G server 2>&1 | head -3 >&2
     exit 1
 fi
-
-# --- ~/.codex/AGENTS.md：设备会话说明块（首次创建、幂等、块外不动、可跳过）---
-# Codex 只读 ~/.codex/AGENTS.md（不读 ~/.agents/AGENTS.md），所以块必须写在这里。
-# 假 ssh 对 'sh -s' 直接本地执行，于是这段远端脚本真的在 $TMP_HOME 下落盘。
-
-AGENTS_MD="$TMP_HOME/.codex/AGENTS.md"
-
-run_full_install_again() {
-    printf '1\nxiaomitest\n134.175.91.169\nubuntu\n22\n' | env FAKE_SSH_LOG="$TMP_HOME/full.log" TERMUX_VERSION=0.118 PATH="$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
-        DEVICE_ONBOARD_REVERSE_PORT_START=2230 DEVICE_ONBOARD_REVERSE_PORT_END=2230 \
-        DEVICE_ONBOARD_CONFIG_DIR="$TMP_HOME/p9" DEVICE_ONBOARD_KEY_DIR="$TMP_HOME/k9" DEVICE_ONBOARD_BIN_DIR="$TMP_HOME/b9" \
-        sh "$ROOT/install.sh" >/tmp/device-onboard-smoke.out 2>&1 || true
-}
-
-# 首次：文件不存在 → 创建，含块，权限 600
-[ -f "$AGENTS_MD" ] || { printf '首次接入没有创建 ~/.codex/AGENTS.md\n' >&2; exit 1; }
-agents_mode=$(stat -c %a "$AGENTS_MD" 2>/dev/null || stat -f %Lp "$AGENTS_MD")
-[ "$agents_mode" = 600 ] || { printf 'AGENTS.md 权限不是 600（是 %s）\n' "$agents_mode" >&2; exit 1; }
-grep -q '<!-- DEVICE-ONBOARD-AGENTS BEGIN -->' "$AGENTS_MD" || { printf 'AGENTS.md 缺少起始标记\n' >&2; exit 1; }
-grep -q '<!-- DEVICE-ONBOARD-AGENTS END -->' "$AGENTS_MD" || { printf 'AGENTS.md 缺少结束标记\n' >&2; exit 1; }
-grep -q '## 设备会话' "$AGENTS_MD" || { printf 'AGENTS.md 缺少块标题\n' >&2; exit 1; }
-grep -q 'DEVICE_ONBOARD_ID' "$AGENTS_MD" || { printf 'AGENTS.md 没说明看 DEVICE_ONBOARD_ID\n' >&2; exit 1; }
-grep -q '有值就是它' "$AGENTS_MD" || { printf 'AGENTS.md 没按新文案说明 DEVICE_ONBOARD_ID\n' >&2; exit 1; }
-grep -q '~/.codex/skills/device-onboard/SKILL.md' "$AGENTS_MD" || { printf 'AGENTS.md 没指向设备档案\n' >&2; exit 1; }
-if grep -q '设备目录是' "$AGENTS_MD"; then
-    printf 'AGENTS.md 仍保留旧的「设备目录」表述（身份不该靠工作目录）\n' >&2
-    sed 's/^/  /' "$AGENTS_MD" >&2
-    exit 1
-fi
-
-# 二次运行：块整体替换、不重复累加；块外内容原样保留
-printf '这行不在块里，必须原样保留。\n' >> "$AGENTS_MD"
-rm -f "$TMP_HOME/p9/config"
-run_full_install_again
-[ "$(grep -c 'DEVICE-ONBOARD-AGENTS BEGIN' "$AGENTS_MD")" = 1 ] || {
-    printf '二次运行把 AGENTS.md 的块写重复了：\n' >&2; sed 's/^/  /' "$AGENTS_MD" >&2; exit 1
-}
-grep -q '这行不在块里，必须原样保留。' "$AGENTS_MD" || { printf 'AGENTS.md 块外内容被改动\n' >&2; exit 1; }
-
-# 文件里有其它内容但没有块 → 追加块，块外内容保留
-awk '/<!-- DEVICE-ONBOARD-AGENTS BEGIN -->/{skip=1;next} /<!-- DEVICE-ONBOARD-AGENTS END -->/{skip=0;next} !skip{print}' "$AGENTS_MD" > "$AGENTS_MD.tmp" && mv "$AGENTS_MD.tmp" "$AGENTS_MD"
-if grep -q 'DEVICE-ONBOARD-AGENTS BEGIN' "$AGENTS_MD"; then
-    printf '测试准备失败：块没有被去掉\n' >&2; exit 1
-fi
-rm -f "$TMP_HOME/p9/config"
-run_full_install_again
-grep -q '<!-- DEVICE-ONBOARD-AGENTS BEGIN -->' "$AGENTS_MD" || { printf '无块文件没有追加块\n' >&2; exit 1; }
-[ "$(grep -c 'DEVICE-ONBOARD-AGENTS BEGIN' "$AGENTS_MD")" = 1 ] || { printf '追加块时写重复了\n' >&2; exit 1; }
-grep -q '这行不在块里，必须原样保留。' "$AGENTS_MD" || { printf '追加块时块外内容被改动\n' >&2; exit 1; }
-
-# DEVICE_ONBOARD_AGENTS_MD=0 → 跳过，不创建（接入照常完成）
-rm -f "$AGENTS_MD" "$TMP_HOME/p9/config"
-printf '1\nxiaomitest\n134.175.91.169\nubuntu\n22\n' | env DEVICE_ONBOARD_AGENTS_MD=0 FAKE_SSH_LOG="$TMP_HOME/full.log" TERMUX_VERSION=0.118 PATH="$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
-    DEVICE_ONBOARD_REVERSE_PORT_START=2230 DEVICE_ONBOARD_REVERSE_PORT_END=2230 \
-    DEVICE_ONBOARD_CONFIG_DIR="$TMP_HOME/p9" DEVICE_ONBOARD_KEY_DIR="$TMP_HOME/k9" DEVICE_ONBOARD_BIN_DIR="$TMP_HOME/b9" \
-    sh "$ROOT/install.sh" >/tmp/device-onboard-smoke.out 2>&1 || true
-if [ -e "$AGENTS_MD" ]; then
-    printf 'DEVICE_ONBOARD_AGENTS_MD=0 却仍然写了 AGENTS.md：\n' >&2; sed 's/^/  /' "$AGENTS_MD" >&2; exit 1
-fi
-grep -q '设备接入完成' /tmp/device-onboard-smoke.out || {
-    printf 'DEVICE_ONBOARD_AGENTS_MD=0 时接入没有正常完成：\n' >&2; sed 's/^/  /' /tmp/device-onboard-smoke.out >&2; exit 1
-}
 
 # --- device-harness：一键（后台隧道 + 前台 harness + 退出收尾）---
 
@@ -822,124 +762,6 @@ printf '%s\n' "$got" | grep -qxF 'REL=[.]' || {
     exit 1
 }
 
-# --- 按 harness 分发：服务器装了哪个 harness，就给哪个铺档案 + 提示块 ---
-# codex → ~/.codex/skills/device-onboard/SKILL.md + ~/.codex/AGENTS.md
-# claude → ~/.claude/skills/device-onboard/SKILL.md + ~/.claude/CLAUDE.md
-# 一个都没装 → 什么都不写（不能凭空建目录）。
-cat > "$FAKE_BIN/ssh" <<'EOF'
-#!/bin/sh
-printf '%s\n' "$*" >> "$FAKE_SSH_LOG"
-case "$*" in *'sh -s'*) exec sh ;; esac
-case "$*" in *DEVICE-ONBOARD-E2E-OK*) printf 'DEVICE-ONBOARD-E2E-OK' ;; esac
-case "$*" in *反向隧道已建立*) printf '✅ 反向隧道已建立\n'; exec sleep 30 ;; esac
-case "$*" in *-R*localhost*) exec sleep 30 ;; esac
-# 技能档案的读写是「复合命令」而不是 sh -s：把最后一个参数当命令本地跑一遍，
-# 沙箱里才会真的落盘 —— 否则断言只能看到“命令发出去了”，看不到结果。
-case "$*" in
-    *skills/device-onboard*)
-        for a in "$@"; do last=$a; done
-        exec sh -c "$last"
-        ;;
-esac
-case "$*" in *'for c in codex claude dsh'*) printf '%s' "${FAKE_HARNESSES-}" ;; esac
-exit 0
-EOF
-cat > "$FAKE_BIN/sshd" <<'EOF'
-#!/bin/sh
-exit 0
-EOF
-chmod 755 "$FAKE_BIN/ssh" "$FAKE_BIN/sshd"
-
-run_install_with_harnesses() {
-    _h=$1
-    _home=$2
-    mkdir -p "$_home"
-    printf '1\nxiaomitest\n134.175.91.169\nubuntu\n22\n' | env FAKE_SSH_LOG="$_home/ssh.log" FAKE_HARNESSES="$_h" TERMUX_VERSION=0.118 \
-        PATH="$FAKE_BIN:$PATH" HOME="$_home" \
-        DEVICE_ONBOARD_REVERSE_PORT_START=2230 DEVICE_ONBOARD_REVERSE_PORT_END=2230 \
-        DEVICE_ONBOARD_CONFIG_DIR="$_home/cfg" DEVICE_ONBOARD_KEY_DIR="$_home/keys" DEVICE_ONBOARD_BIN_DIR="$_home/bin" \
-        sh "$ROOT/install.sh" >"$_home/out" 2>&1 || true
-}
-
-# ① 两个都装：两份档案（内容一致）+ 两个记忆文件（各指自己的档案）
-run_install_with_harnesses 'codex claude' "$TMP_HOME/h30"
-CX_SKILL="$TMP_HOME/h30/.codex/skills/device-onboard/SKILL.md"
-CL_SKILL="$TMP_HOME/h30/.claude/skills/device-onboard/SKILL.md"
-CX_MD="$TMP_HOME/h30/.codex/AGENTS.md"
-CL_MD="$TMP_HOME/h30/.claude/CLAUDE.md"
-for f in "$CX_SKILL" "$CL_SKILL" "$CX_MD" "$CL_MD"; do
-    [ -f "$f" ] || { printf '该写却没写：%s\n' "$f" >&2; sed 's/^/  /' "$TMP_HOME/h30/out" >&2; exit 1; }
-done
-cmp -s "$CX_SKILL" "$CL_SKILL" || { printf 'codex 与 claude 的档案内容不一致\n' >&2; exit 1; }
-grep -q '<!-- DEVICE-ONBOARD-AGENTS BEGIN -->' "$CX_MD" || { printf 'codex 记忆文件缺起始标记\n' >&2; exit 1; }
-grep -q '~/.codex/skills/device-onboard/SKILL.md' "$CX_MD" || { printf 'codex 记忆文件没指向自己的档案\n' >&2; exit 1; }
-grep -q '<!-- DEVICE-ONBOARD-CLAUDE BEGIN -->' "$CL_MD" || { printf 'claude 记忆文件缺起始标记\n' >&2; exit 1; }
-grep -q '<!-- DEVICE-ONBOARD-CLAUDE END -->' "$CL_MD" || { printf 'claude 记忆文件缺结束标记\n' >&2; exit 1; }
-grep -q '~/.claude/skills/device-onboard/SKILL.md' "$CL_MD" || { printf 'claude 记忆文件没指向 claude 的档案\n' >&2; exit 1; }
-grep -q 'DEVICE_ONBOARD_ID' "$CL_MD" || { printf 'claude 记忆文件没说明身份变量\n' >&2; exit 1; }
-for f in "$CX_MD" "$CL_MD"; do
-    _m=$(stat -c %a "$f" 2>/dev/null || stat -f %Lp "$f")
-    [ "$_m" = 600 ] || { printf '%s 权限应为 600，实际 %s\n' "$f" "$_m" >&2; exit 1; }
-done
-
-# ② 只装 claude：~/.codex 下一个文件都不该出现
-run_install_with_harnesses 'claude' "$TMP_HOME/h31"
-[ -f "$TMP_HOME/h31/.claude/CLAUDE.md" ] || { printf '只装 claude 却没写 CLAUDE.md\n' >&2; exit 1; }
-[ -f "$TMP_HOME/h31/.claude/skills/device-onboard/SKILL.md" ] || { printf '只装 claude 却没写档案\n' >&2; exit 1; }
-if [ -e "$TMP_HOME/h31/.codex" ]; then
-    printf '只装了 claude，却凭空建了 ~/.codex\n' >&2
-    exit 1
-fi
-
-# ③ 一个都没装：目录都不建，并且明确提示
-run_install_with_harnesses '' "$TMP_HOME/h32"
-if [ -e "$TMP_HOME/h32/.codex" ] || [ -e "$TMP_HOME/h32/.claude" ]; then
-    printf '没探测到 harness，却建了目录\n' >&2
-    exit 1
-fi
-grep -q '没探测到' "$TMP_HOME/h32/out" || { printf '没探测到 harness 时没有提示\n' >&2; sed 's/^/  /' "$TMP_HOME/h32/out" >&2; exit 1; }
-
-# ④ 只装 dsh：写 ~/.dsh/AGENTS.md 的登记块，但**不写 SKILL.md**
-# dsh 的 skill 是按会话 workdir 发现的（{workdir}/skills/），没有全局技能根；
-# 设备登记这种全局档案只能落在 $DSH_HOME/AGENTS.md，所以它没有档案文件。
-run_install_with_harnesses 'dsh' "$TMP_HOME/h33"
-DSH_MD="$TMP_HOME/h33/.dsh/AGENTS.md"
-[ -f "$DSH_MD" ] || { printf '只装 dsh 却没写 ~/.dsh/AGENTS.md：\n' >&2; sed 's/^/  /' "$TMP_HOME/h33/out" >&2; exit 1; }
-grep -q '<!-- DEVICE-ONBOARD:xiaomitest BEGIN -->' "$DSH_MD" || { printf 'dsh 登记块缺起始标记\n' >&2; exit 1; }
-grep -q '<!-- DEVICE-ONBOARD:xiaomitest END -->' "$DSH_MD" || { printf 'dsh 登记块缺结束标记\n' >&2; exit 1; }
-grep -q 'DEVICE_ONBOARD_ID' "$DSH_MD" || { printf 'dsh 登记块没说明身份变量\n' >&2; exit 1; }
-grep -q 'ssh \$DEVICE_ONBOARD_DEVICE_ALIAS' "$DSH_MD" || { printf 'dsh 登记块没给出回连方式\n' >&2; exit 1; }
-# 端口/密钥名是「没有档案文件」的补偿：dsh 侧必须自带这些，否则什么都查不到
-grep -q '127.0.0.1:2230' "$DSH_MD" || { printf 'dsh 登记块没写反向端口\n' >&2; sed 's/^/  /' "$DSH_MD" >&2; exit 1; }
-grep -q 'onboard-device-xiaomitest' "$DSH_MD" || { printf 'dsh 登记块没写回连别名\n' >&2; exit 1; }
-grep -q 'xiaomitest-server' "$DSH_MD" || { printf 'dsh 登记块没写服务器侧公钥名\n' >&2; exit 1; }
-if [ -e "$TMP_HOME/h33/.dsh/skills" ]; then
-    printf '给 dsh 写了 skills/ 目录（它的 skill 是按 workdir 发现的，不该往 HOME 里塞）\n' >&2
-    exit 1
-fi
-if [ -e "$TMP_HOME/h33/.codex" ] || [ -e "$TMP_HOME/h33/.claude" ]; then
-    printf '只装了 dsh，却凭空建了 ~/.codex 或 ~/.claude\n' >&2
-    exit 1
-fi
-# 幂等：重跑只该有一块
-run_install_with_harnesses 'dsh' "$TMP_HOME/h33"
-_dsh_blocks=$(grep -c '^<!-- DEVICE-ONBOARD:xiaomitest BEGIN -->$' "$DSH_MD" || true)
-[ "$_dsh_blocks" = 1 ] || { printf '重跑后 dsh 登记块有 %s 个（应该是 1 个）\n' "$_dsh_blocks" >&2; exit 1; }
-
-# ⑤ DEVICE_ONBOARD_DSH_MD=0 → 跳过 dsh 的块（接入照常完成）
-mkdir -p "$TMP_HOME/h34"
-printf '1\nxiaomitest\n134.175.91.169\nubuntu\n22\n' | env FAKE_SSH_LOG="$TMP_HOME/h34/ssh.log" FAKE_HARNESSES='dsh' TERMUX_VERSION=0.118 \
-    PATH="$FAKE_BIN:$PATH" HOME="$TMP_HOME/h34" DEVICE_ONBOARD_DSH_MD=0 \
-    DEVICE_ONBOARD_REVERSE_PORT_START=2230 DEVICE_ONBOARD_REVERSE_PORT_END=2230 \
-    DEVICE_ONBOARD_CONFIG_DIR="$TMP_HOME/h34/cfg" DEVICE_ONBOARD_KEY_DIR="$TMP_HOME/h34/keys" DEVICE_ONBOARD_BIN_DIR="$TMP_HOME/h34/bin" \
-    sh "$ROOT/install.sh" >"$TMP_HOME/h34/out" 2>&1 || true
-grep -q '设备接入完成' "$TMP_HOME/h34/out" || { printf '跳过 dsh 块时接入没完成\n' >&2; exit 1; }
-if [ -e "$TMP_HOME/h34/.dsh/AGENTS.md" ]; then
-    printf 'DEVICE_ONBOARD_DSH_MD=0 却没跳过\n' >&2
-    exit 1
-fi
-
-
 # --- 端口候选逻辑：自己的隧道要复用，别人的要让开 ---
 # 背景（真机踩过）：清空服务器档案后重跑安装，候选里既没有「本设备登记过的端口」，
 # 也不知道别的设备登记了什么；而本设备隧道还开着 → 2230 被自己占着、bind 必然失败
@@ -1082,7 +904,7 @@ install_into "$U1" || { printf '卸载用例的前置安装失败：\n' >&2; sed
     exit 1
 }
 grep -q 'device-onboard:xiaomitest' "$U1/.ssh/authorized_keys" || { printf '前置安装没写本地 authorized_keys\n' >&2; exit 1; }
-[ -f "$U1-server/.codex/skills/device-onboard/SKILL.md" ] || { printf '前置安装没在服务器侧写设备档案\n' >&2; exit 1; }
+grep -q '设备视图' "$U1/out" || { printf '接入时没提设备视图（服务器侧那一半）\n' >&2; exit 1; }
 grep -q 'Host onboard-device-xiaomitest' "$U1-server/.ssh/config" || { printf '前置安装没在服务器侧写回连 Host\n' >&2; exit 1; }
 
 uninstall_from "$U1" "$U1-server" || {
@@ -1111,11 +933,7 @@ if grep -q 'device-onboard:xiaomitest' "$U1/.ssh/authorized_keys" 2>/dev/null; t
 fi
 
 # 服务器侧
-assert_gone "$U1-server/.codex/skills/device-onboard/SKILL.md" '设备档案'
-assert_gone "$U1-server/.claude/skills/device-onboard/SKILL.md" '设备档案（claude 那份）'
-assert_gone "$U1-server/.codex/AGENTS.md" '记忆文件（原来只有本工具的块）'
-assert_gone "$U1-server/.claude/CLAUDE.md" '记忆文件（原来只有本工具的块）'
-assert_gone "$U1-server/.dsh/AGENTS.md" 'dsh 的设备登记块（原来只有本工具的块）'
+# 老方案（skill / AGENTS / CLAUDE / dsh 提示块）已经不再写；安装时若还有残留会被就地清掉
 assert_gone "$U1-server/.ssh/device-onboard/xiaomitest-server" '服务器侧回连密钥'
 if grep -q 'device-onboard' "$U1-server/.ssh/config" 2>/dev/null; then
     printf '卸载后服务器侧 ~/.ssh/config 里还有回连区块：\n' >&2
@@ -1246,19 +1064,7 @@ if grep -q 'TUNNEL_HOST_ALIAS' "$R1/cfg/config"; then
     exit 1
 fi
 # --repair 顺带把服务器侧的档案/提示块也按当前版本重铺一遍（不必为此重新接入）
-grep -q 'reverse_port: 2230' "$R1-server/.codex/skills/device-onboard/SKILL.md" 2>/dev/null || {
-    printf -- '--repair 没补写服务器的设备档案：\n' >&2
-    ls -R "$R1-server/.codex" 2>/dev/null >&2
-    exit 1
-}
-grep -q '<!-- DEVICE-ONBOARD:xiaomitest BEGIN -->' "$R1-server/.dsh/AGENTS.md" 2>/dev/null || {
-    printf -- '--repair 没补写 dsh 的 ~/.dsh/AGENTS.md 登记块（新支持的 harness 才能这样补上）\n' >&2
-    exit 1
-}
-grep -q '<!-- DEVICE-ONBOARD-AGENTS BEGIN -->' "$R1-server/.codex/AGENTS.md" 2>/dev/null || {
-    printf -- '--repair 没补写 codex 的设备会话块\n' >&2
-    exit 1
-}
+grep -q '设备视图' "$R1/out" || { printf -- '--repair 没有重新落地服务器侧设备视图：\n' >&2; sed 's/^/  /' "$R1/out" >&2; exit 1; }
 
 # 没有状态文件时 --repair 要明确报错，而不是跑进向导
 if PATH="$UBIN:$PATH" HOME="$TMP_HOME" \
@@ -1294,32 +1100,17 @@ T1="$TMP_HOME/t1"; T2="$TMP_HOME/t2"; TS="$TMP_HOME/tsrv"
 mkdir -p "$TS/.ssh"
 install_into "$T1" devicea "$TS" 2231 || { printf '两台设备用例：第一台安装失败：\n' >&2; sed 's/^/  /' "$T1/out" >&2; exit 1; }
 install_into "$T2" deviceb "$TS" 2231 || { printf '两台设备用例：第二台安装失败：\n' >&2; sed 's/^/  /' "$T2/out" >&2; exit 1; }
-SKF="$TS/.codex/skills/device-onboard/SKILL.md"
-grep -q 'DEVICE-ONBOARD:devicea' "$SKF" || { printf '两台设备没都登记进档案\n' >&2; exit 1; }
-grep -q 'DEVICE-ONBOARD:deviceb' "$SKF" || { printf '两台设备没都登记进档案\n' >&2; exit 1; }
-[ -f "$TS/.codex/AGENTS.md" ] || { printf '安装没写记忆文件\n' >&2; exit 1; }
+grep -q 'Host onboard-device-devicea' "$TS/.ssh/config" || { printf '第一台没写服务器侧回连块\n' >&2; exit 1; }
+grep -q 'Host onboard-device-deviceb' "$TS/.ssh/config" || { printf '第二台没写服务器侧回连块\n' >&2; exit 1; }
 
 uninstall_from "$T1" "$TS" || { printf '两台设备用例：卸载第一台失败：\n' >&2; sed 's/^/  /' "$T1/un.out" >&2; exit 1; }
-if grep -q 'DEVICE-ONBOARD:devicea' "$SKF"; then
-    printf '卸载没去掉本设备的档案块\n' >&2
+if grep -q 'Host onboard-device-devicea' "$TS/.ssh/config"; then
+    printf '卸载没去掉本设备的回连块\n' >&2
     exit 1
 fi
-grep -q 'DEVICE-ONBOARD:deviceb' "$SKF" || { printf '卸载把另一台设备的档案块也删了：\n' >&2; sed 's/^/  /' "$SKF" >&2; exit 1; }
-# 记忆文件里的块不分设备：卸载语义是「装了什么就删什么」，所以它也会被删 ——
-# 但必须说清楚「另一台设备的会话会因此少这条提示」，别让人事后才发现。
-if grep -q 'DEVICE-ONBOARD-AGENTS BEGIN' "$TS/.codex/AGENTS.md" 2>/dev/null; then
-    printf '卸载没有清掉记忆文件里的提示块（卸载语义是全部删掉）\n' >&2
-    exit 1
-fi
-grep -q '记忆文件的提示块是共用的' "$T1/un.out" || {
-    printf '删了共用提示块却没提醒（另一台设备的会话会少这条提示）：\n' >&2
-    sed 's/^/  /' "$T1/un.out" >&2
-    exit 1
-}
-
-# 最后一台也卸掉 → 档案目录也该消失
+grep -q 'Host onboard-device-deviceb' "$TS/.ssh/config" || { printf '卸载把另一台设备的回连块也删了：\n' >&2; sed 's/^/  /' "$TS/.ssh/config" >&2; exit 1; }
+# 最后一台也卸掉
 uninstall_from "$T2" "$TS" || { printf '两台设备用例：卸载第二台失败：\n' >&2; sed 's/^/  /' "$T2/un.out" >&2; exit 1; }
-assert_gone "$SKF" '设备档案（最后一台卸掉后）'
 
 # ⑥ 老状态文件里没有 BIN_DIR：从 PATH 上找，但只认 $HOME 底下的、且确实是我们的脚本
 U5="$TMP_HOME/u5"
@@ -1342,6 +1133,52 @@ assert_gone "$U5/bin/device-harness" '本地命令（从 PATH 上找到的）'
 }
 
 # 未知参数要明确拒绝，别默默当普通安装跑
+
+
+# --- 设备视图：会话要经 device-view 起，且用 real-sh 包复合命令 ---
+mkdir -p "$TMP_HOME/vw"
+cat > "$FAKE_BIN/ssh" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_SSH_LOG"
+case "$*" in *'device-view'*'sshfs'*) exit "${FAKE_VIEW_READY:-0}" ;; esac
+case "$*" in *反向隧道已建立*) printf '✅ 反向隧道已建立\n'; exec sleep 30 ;; esac
+case "$*" in *-R*localhost*) exec sleep 30 ;; esac
+exit 0
+EOF
+chmod 755 "$FAKE_BIN/ssh"
+
+: > "$TMP_HOME/vw.log"
+env FAKE_SSH_LOG="$TMP_HOME/vw.log" TERMUX_VERSION=0.118 PATH="$TMP_HOME/b9:$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
+    DEVICE_ONBOARD_CONFIG_FILE="$TMP_HOME/p9/config" DEVICE_ONBOARD_DEVICE_VIEW=1 \
+    sh "$TMP_HOME/b9/device-harness" -C /proj codex > "$TMP_HOME/vw.out" 2>&1 || true
+grep -q '设备视图：开' "$TMP_HOME/vw.out" || {
+    printf 'view 模式下没有报告「设备视图：开」：\n' >&2; sed 's/^/  /' "$TMP_HOME/vw.out" >&2; exit 1; }
+grep -q '/opt/device-onboard/device-view --alias' "$TMP_HOME/vw.log" || {
+    printf '没有经 device-view 启动：\n' >&2; sed 's/^/  /' "$TMP_HOME/vw.log" >&2; exit 1; }
+grep -q "device-view --alias .* -C '/proj'" "$TMP_HOME/vw.log" || {
+    printf 'device-view 没带上 -C 指定的工作目录：\n' >&2; sed 's/^/  /' "$TMP_HOME/vw.log" >&2; exit 1; }
+grep -q '/opt/device-onboard/real-sh -c' "$TMP_HOME/vw.log" || {
+    printf '没有用 real-sh 包一层（复合命令会被当成一个可执行文件名）：\n' >&2; sed 's/^/  /' "$TMP_HOME/vw.log" >&2; exit 1; }
+grep -q 'codex --no-daemon' "$TMP_HOME/vw.log" || {
+    printf '视图模式把 harness 命令丢了：\n' >&2; sed 's/^/  /' "$TMP_HOME/vw.log" >&2; exit 1; }
+
+# 显式要求视图、但服务器上装不了 → 必须报错，不能偷偷降级成普通会话
+if env FAKE_SSH_LOG="$TMP_HOME/vw.log" FAKE_VIEW_READY=1 TERMUX_VERSION=0.118 PATH="$TMP_HOME/b9:$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
+    DEVICE_ONBOARD_CONFIG_FILE="$TMP_HOME/p9/config" DEVICE_ONBOARD_DEVICE_VIEW=1 \
+    sh "$TMP_HOME/b9/device-harness" codex > "$TMP_HOME/vw2.out" 2>&1; then
+    printf '要求 --device-view 但服务器没有，竟然算成功\n' >&2
+    sed 's/^/  /' "$TMP_HOME/vw2.out" >&2
+    exit 1
+fi
+grep -q '先跑 install.sh' "$TMP_HOME/vw2.out" || { printf '缺视图时没给出可操作的提示：\n' >&2; sed 's/^/  /' "$TMP_HOME/vw2.out" >&2; exit 1; }
+
+# 默认(auto)：装不上就提示一句并退回普通会话，不拦人
+: > "$TMP_HOME/vw3.log"
+env FAKE_SSH_LOG="$TMP_HOME/vw3.log" FAKE_VIEW_READY=1 TERMUX_VERSION=0.118 PATH="$TMP_HOME/b9:$FAKE_BIN:$PATH" HOME="$TMP_HOME" \
+    DEVICE_ONBOARD_CONFIG_FILE="$TMP_HOME/p9/config" DEVICE_ONBOARD_DEVICE_VIEW=auto \
+    sh "$TMP_HOME/b9/device-harness" codex > "$TMP_HOME/vw3.out" 2>&1 || true
+grep -q '按普通远程会话跑' "$TMP_HOME/vw3.out" || {
+    printf 'auto 模式下视图不可用时没有明确提示：\n' >&2; sed 's/^/  /' "$TMP_HOME/vw3.out" >&2; exit 1; }
 
 # --- 变量引用与多字节字符的边界 ---
 # macOS 的 /bin/sh 是 bash 3.2：具名变量引用后面紧跟一个汉字时，它会把那个多字节

@@ -277,11 +277,9 @@ flowchart TD
 
 ## 9. 服务器侧看到什么
 
-- **设备档案**：`~/.codex/skills/device-onboard/SKILL.md` 与
-  `~/.claude/skills/device-onboard/SKILL.md`（只给探测到的 harness 建；内容完全相同）
-- **dsh 的登记**：`~/.dsh/AGENTS.md` 里的设备块（一台一块，**自带端口与密钥名**）。
-  dsh 不给 `SKILL.md`：它的 skill 是按会话 workdir 发现的（`{workdir}/skills/`），
-  没有全局技能根；全局可读的只有 `$DSH_HOME/AGENTS.md`
+- **设备视图**：`/opt/device-onboard/{device-view,real-sh,shim/*}` —— 会话级命名空间里
+  做「同路径挂载 + shell 转发」，harness 以为自己在设备上。原来那套 skill / AGENTS.md /
+  CLAUDE.md / `~/.dsh/AGENTS.md` 的提示块已经不再写，安装时会就地把残留清掉
   —— 一个 skill 记所有设备，每台一个块；还有一个放在所有设备块之外的
   **共享约定块**，说明"本次会话来自哪台设备"以环境变量形式传进来
   （`DEVICE_ONBOARD_ID`、`DEVICE_ONBOARD_DEVICE_ALIAS`）。

@@ -140,7 +140,18 @@ device-harness dsh
 
 反向隧道照旧一起起：dsh 里那个 agent 仍然可以 `ssh onboard-device-<名字>` 回到设备上干活。
 
-**dsh 侧的「档案」长什么样**：不写 `SKILL.md`。codex/claude 有全局技能目录，dsh 的 skill 是按**会话 workdir** 发现的（`{workdir}/skills/<名字>/`），把设备登记这种全局档案塞进去既没有稳定位置、还得往用户项目目录里写东西。dsh 唯一稳定、全局读的位置是 `$DSH_HOME/AGENTS.md`（默认 `~/.dsh/AGENTS.md`），所以那儿写一块**自带端口与密钥名**的登记（一台设备一块），agent 不用再去别处查。
+**设备视图（`--device-view`）：不再靠提示词让 agent 自己 `ssh`。**
+会话在服务器上开一个 **mount namespace**：设备家目录按**相同绝对路径**挂进来（`/Users/mac` → 服务器 `/Users/mac`），`/usr/bin/{bash,zsh}` 换成**转发到设备**的垫片，harness 在里面跑。于是 agent 看到的路径、读写的文件、跑的命令，全都落在设备上 —— 它不需要知道"这是远程"，也就不需要被告知（原来那套 skill + AGENTS.md 提示已经删掉）。
+
+会话结束，命名空间消失，挂载和 shell 替换一起没 —— 没有"忘了卸载"这回事，`kill -9` 也不会留僵死挂载。
+
+```sh
+device-harness --device-view          # 开（auto：服务器装好了就用）
+device-harness --no-device-view       # 关，回到普通远程会话
+DEVICE_ONBOARD_DEVICE_VIEW=0          # 等价的环境变量
+```
+
+代价与边界：文件操作走 FUSE（手机偏慢、没有 `inotify`）、命令延迟约 60ms/条（连接复用后）、服务器算力不参与；命令失败会明确报错，**绝不静默回落到本地执行**。
 
 ## 命令速查
 
@@ -201,11 +212,10 @@ device-harness dsh
 
 | 路径 | 内容 |
 |---|---|
-| `~/.codex/skills/device-onboard/SKILL.md` | 设备档案（只给探测到的 harness 建） |
-| `~/.claude/skills/device-onboard/SKILL.md` | 同上，claude 一份 |
-| `~/.codex/AGENTS.md` | 「设备会话」标记块 |
-| `~/.claude/CLAUDE.md` | 「设备会话」标记块 |
-| `~/.dsh/AGENTS.md` | dsh 的「设备接入登记」块（一台一块；dsh 的 skill 是按会话 workdir 发现的，没有全局档案文件） |
+| `/opt/device-onboard/device-view` | 会话级启动器：建命名空间 → 同路径挂载 → 起 harness |
+| `/opt/device-onboard/shim/{sh,bash,zsh}` | 转发垫片：把命令送到设备上执行 |
+| `/opt/device-onboard/real-sh` | 私有 POSIX 壳副本（垫片的 shebang 只能指向它，否则自我递归） |
+| `/Users/<设备用户>`（同路径） | 挂载点：设备家目录挂到这里 |
 | `~/.ssh/config` | `onboard-device-*` 回连 Host 块 |
 
 档案只记重新生成 SSH 配置所需的最小信息（设备名、端口、钥匙名、用户），**不存私钥**，也**不存易变字段**（比如「最后在线时间」—— 那是运行时事实，用时现场查）。
@@ -223,7 +233,7 @@ device-harness dsh
 | `DEVICE_ONBOARD_REVERSE_PORT_START` / `_END` | `2230` / `2299` | 反向端口范围（避开手工占用的低位端口） |
 | `DEVICE_ONBOARD_AGENTS_MD` | `1` | 设为 `0` 跳过服务器 `~/.codex/AGENTS.md` 的标记块 |
 | `DEVICE_ONBOARD_CLAUDE_MD` | `1` | 设为 `0` 跳过服务器 `~/.claude/CLAUDE.md` 的标记块 |
-| `DEVICE_ONBOARD_DSH_MD` | `1` | 设为 `0` 跳过服务器 `~/.dsh/AGENTS.md` 的设备登记块 |
+| `DEVICE_ONBOARD_DEVICE_VIEW` | `auto` | `1` 强制设备视图（缺依赖就报错）、`0` 关掉、`auto` 装好了就用 |
 
 `device-harness dsh` 另有两个（在设备上跑命令时用）：
 
