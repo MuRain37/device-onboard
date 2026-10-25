@@ -54,10 +54,13 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-# 没给 -C 时，默认落在服务器家目录。设备身份不靠工作目录表示 ——
-# 本次会话来自哪台设备，由 ssh 带过去的 DEVICE_ONBOARD_ID /
-# DEVICE_ONBOARD_DEVICE_ALIAS 环境变量传递（见文件末尾）。
-[ -n "$DIR" ] || DIR='$HOME'
+# 没给 -C 时默认落在「家目录」——但哪个家目录取决于有没有开设备视图：
+#   视图开着：设备视图把设备家目录挂在相同路径，所以直接用**设备上的**家目录（展开成绝对路径），
+#            这样 harness 的 -C/cd 与命令实际落点一致（否则 codex 会以为自己站在 /home/ubuntu）
+#   视图关着：仍用字面量的 $HOME ，交给服务器展开
+if [ -z "$DIR" ]; then
+    if [ "$VIEW" = 0 ]; then DIR='$HOME'; else DIR=$HOME; fi   # 视图里用设备家目录（绝对路径）
+fi
 
 # 目录是「服务器上」的路径。~ 要留给服务器展开：
 # 如果写成 ~/phone，手机上那个 shell 会先把它展开成手机的路径（错），
