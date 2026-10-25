@@ -63,7 +63,13 @@ done
 PATH="$ROOT/shim:$PATH"; export PATH
 cd "$REAL_HOME" 2>/dev/null || true
 
-# ② 同路径挂载
+# ② 同路径挂载（DEVICE_ONBOARD_VIEW_NO_MOUNT=1 可跳过：只做 shell 转发，不挂文件）
+if [ "${DEVICE_ONBOARD_VIEW_NO_MOUNT:-0}" = 1 ]; then
+    printf '注意：跳过了文件挂载（只转发命令）—— harness 自带的读写文件工具会看不到设备文件。\n' >&2
+    cd "${HOME:-/}" 2>/dev/null || true
+    "$@"
+    exit $?
+fi
 mkdir -p "$MNT"
 # -f：让 sshfs 留在前台。不加它 sshfs 会 fork 到后台，$! 拿到的是那个立刻退出的父进程，
 # 后面的 kill 就打空了 → 会话结束留一条 ssh 连接挂在设备上（实测过）。

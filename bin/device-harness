@@ -249,6 +249,10 @@ fi
 # special builtin，赋值不留在 shell 里）→ cd 之后的命令根本看不到这几个变量。
 # 真机踩过：device-harness sh -c 'env | grep DEVICE_ONBOARD' 一行都打不出来。
 ENV_PREFIX="export DEVICE_ONBOARD_ID=$(squote "$DEVICE_ID") DEVICE_ONBOARD_DEVICE_ALIAS=$(squote "$DEVICE_HOST_ALIAS") DEVICE_ONBOARD_DEVICE_CWD=$(squote "$DEVICE_CWD") DEVICE_ONBOARD_DEVICE_CWD_REL=$(squote "$DEVICE_CWD_REL");"
+# 只转发命令、不挂文件（排障/轻量用）：开关必须显式带给服务器上的 device-view
+if [ "${DEVICE_ONBOARD_VIEW_NO_MOUNT:-0}" = 1 ]; then
+    ENV_PREFIX="$ENV_PREFIX export DEVICE_ONBOARD_VIEW_NO_MOUNT=1;"
+fi
 
 # ---------- dsh：把服务器的 Web GUI 搬到设备的 127.0.0.1 ----------
 # dsh web 只绑 loopback（`--host 0.0.0.0` 明确不支持），所以「在设备上打开网页」
