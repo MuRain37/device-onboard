@@ -68,6 +68,7 @@ mkdir -p "$MNT"
 # -f：让 sshfs 留在前台。不加它 sshfs 会 fork 到后台，$! 拿到的是那个立刻退出的父进程，
 # 后面的 kill 就打空了 → 会话结束留一条 ssh 连接挂在设备上（实测过）。
 sshfs -f -o reconnect,ServerAliveInterval=10,ServerAliveCountMax=3 -o auto_unmount \
+      -o idmap=user \
       "$ALIAS:$MNT" "$MNT" &
 SFS_PID=$!
 cleanup() {
